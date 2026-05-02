@@ -12,6 +12,7 @@ data/uploads/
 *.txt
 *.htm
 *.html
+!requirements.txt
 !U991061-2026-04-27.xls
 !sample_data/
 !sample_data/*.txt

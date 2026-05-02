@@ -1,0 +1,594 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+import pandas as pd
+
+from config import DATA_DIR, DB_PATH
+from transform import add_derived_columns
+
+
+MARGIN_CONCEPT_COLUMNS = {
+    "Comisión Cambio Modelo Contado": "Margen Cambio Modelo Contado",
+    "Comisión venta de unidades 1ra. parte": "Margen Venta 1ra parte",
+    "Comisión venta de unidades 2da. parte": "Margen Venta 2da parte",
+}
+
+
+def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    backfill_derived_fields(conn)
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS records (
+            record_key TEXT PRIMARY KEY,
+            fecha TEXT,
+            factura TEXT,
+            matricula TEXT,
+            importe REAL,
+            cliente TEXT,
+            producto TEXT,
+            row_hash TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            source_file TEXT,
+            first_imported_at TEXT NOT NULL,
+            last_imported_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_file TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            total_rows INTEGER NOT NULL,
+            inserted_rows INTEGER NOT NULL,
+            updated_rows INTEGER NOT NULL,
+            unchanged_rows INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS txt_records (
+            record_key TEXT PRIMARY KEY,
+            row_hash TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            source_file TEXT,
+            first_imported_at TEXT NOT NULL,
+            last_imported_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS txt_imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_file TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            total_rows INTEGER NOT NULL,
+            inserted_rows INTEGER NOT NULL,
+            updated_rows INTEGER NOT NULL,
+            unchanged_rows INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS margin_records (
+            margin_key TEXT PRIMARY KEY,
+            data_json TEXT NOT NULL,
+            source_file TEXT,
+            first_imported_at TEXT NOT NULL,
+            last_imported_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def load_records(conn: sqlite3.Connection) -> pd.DataFrame:
+    rows = conn.execute("SELECT * FROM records").fetchall()
+    if not rows:
+        return pd.DataFrame()
+
+    decoded = []
+    for row in rows:
+        base = dict(row)
+        data = json.loads(base.pop("data_json") or "{}")
+        decoded.append({**data, **base})
+    return add_derived_columns(pd.DataFrame(decoded))
+
+
+def load_imports(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT * FROM imports ORDER BY imported_at DESC, id DESC",
+        conn,
+    )
+
+
+def load_txt_records(conn: sqlite3.Connection) -> pd.DataFrame:
+    rows = conn.execute("SELECT * FROM txt_records").fetchall()
+    if not rows:
+        return pd.DataFrame()
+
+    decoded = []
+    for row in rows:
+        base = dict(row)
+        data = json.loads(base.pop("data_json") or "{}")
+        decoded.append({**data, **base})
+    return pd.DataFrame(decoded)
+
+
+def load_txt_imports(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT * FROM txt_imports ORDER BY imported_at DESC, id DESC",
+        conn,
+    )
+
+
+def load_margin_records(conn: sqlite3.Connection) -> pd.DataFrame:
+    rows = conn.execute("SELECT * FROM margin_records").fetchall()
+    if not rows:
+        return pd.DataFrame()
+
+    decoded = []
+    for row in rows:
+        base = dict(row)
+        data = json.loads(base.pop("data_json") or "{}")
+        decoded.append({**data, **base})
+    return pd.DataFrame(decoded)
+
+
+def upsert_txt_records(
+    conn: sqlite3.Connection,
+    df: pd.DataFrame,
+    source_file: str,
+    key_columns: Iterable[str],
+) -> dict[str, int]:
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    inserted = updated = unchanged = 0
+    key_columns = list(key_columns)
+
+    for _, row in df.iterrows():
+        row_dict = _clean_row(row.to_dict())
+        record_key = make_record_key(row_dict, key_columns)
+        row_hash = str(pd.util.hash_pandas_object(pd.Series(row_dict), index=True).sum())
+
+        existing = conn.execute(
+            "SELECT data_json, row_hash FROM txt_records WHERE record_key = ?",
+            (record_key,),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO txt_records (
+                    record_key, row_hash, data_json, source_file, first_imported_at, last_imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_key,
+                    row_hash,
+                    json.dumps(row_dict, ensure_ascii=False, default=str),
+                    source_file,
+                    now,
+                    now,
+                ),
+            )
+            inserted += 1
+            continue
+
+        merged = _merge_rows(json.loads(existing["data_json"]), row_dict)
+        merged_hash = str(pd.util.hash_pandas_object(pd.Series(merged), index=True).sum())
+
+        if merged_hash == existing["row_hash"]:
+            unchanged += 1
+            continue
+
+        conn.execute(
+            """
+            UPDATE txt_records
+            SET row_hash = ?, data_json = ?, source_file = ?, last_imported_at = ?
+            WHERE record_key = ?
+            """,
+            (
+                merged_hash,
+                json.dumps(merged, ensure_ascii=False, default=str),
+                source_file,
+                now,
+                record_key,
+            ),
+        )
+        updated += 1
+
+    conn.execute(
+        """
+        INSERT INTO txt_imports (
+            source_file, imported_at, total_rows, inserted_rows, updated_rows, unchanged_rows
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (source_file, now, len(df), inserted, updated, unchanged),
+    )
+    conn.commit()
+
+    return {
+        "total": len(df),
+        "inserted": inserted,
+        "updated": updated,
+        "unchanged": unchanged,
+    }
+
+
+def apply_txt_margins(conn: sqlite3.Connection, margins_df: pd.DataFrame, source_file: str) -> dict[str, int]:
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    stored_margins = _upsert_margin_records(conn, margins_df, source_file, now)
+    rows = conn.execute("SELECT record_key, data_json, row_hash FROM txt_records").fetchall()
+    margin_lookup: dict[tuple[str, str], list[dict]] = {}
+    for _, margin_row in margins_df.iterrows():
+        key = (_normalize_key(margin_row.get("Grupo margen")), _normalize_order(margin_row.get("Orden margen")))
+        margin_lookup.setdefault(key, []).append(margin_row.to_dict())
+
+    matched_rows = updated = unchanged = 0
+    matched_margins = 0
+
+    for row in rows:
+        data = json.loads(row["data_json"] or "{}")
+        key = (_normalize_key(data.get("Grupo")), _normalize_order(data.get("Orden")))
+        margins = margin_lookup.get(key, [])
+        if not margins:
+            continue
+
+        matched_rows += 1
+        matched_margins += len(margins)
+        enriched = data.copy()
+        concepts = set(_split_margin_concepts(enriched.get("Concepto margen")))
+        margin_sources = set(_split_margin_concepts(enriched.get("Archivo margen")))
+
+        for margin in margins:
+            concept = margin.get("Concepto margen")
+            amount = _as_float(margin.get("Importe margen")) or 0
+            concept_column = MARGIN_CONCEPT_COLUMNS.get(str(concept))
+            if concept_column:
+                enriched[concept_column] = amount
+            concepts.add(str(concept))
+            margin_sources.add(source_file)
+            enriched["Contrato margen"] = margin.get("Contrato margen")
+            enriched["Fecha margen"] = margin.get("Fecha margen")
+            enriched["Suscripcion margen"] = margin.get("Suscripcion margen")
+            enriched["Cuota margen"] = margin.get("Cuota margen")
+
+        total_margin = sum(_as_float(enriched.get(column)) or 0 for column in MARGIN_CONCEPT_COLUMNS.values())
+        enriched["Margen total"] = total_margin
+        enriched["Concepto margen"] = " | ".join(sorted(concept for concept in concepts if concept and concept != "None"))
+        enriched["Importe margen"] = total_margin
+        enriched["Archivo margen"] = " | ".join(sorted(source for source in margin_sources if source and source != "None"))
+        enriched_hash = str(pd.util.hash_pandas_object(pd.Series(enriched), index=True).sum())
+
+        if enriched_hash == row["row_hash"]:
+            unchanged += 1
+            continue
+
+        conn.execute(
+            """
+            UPDATE txt_records
+            SET row_hash = ?, data_json = ?, last_imported_at = ?
+            WHERE record_key = ?
+            """,
+            (
+                enriched_hash,
+                json.dumps(enriched, ensure_ascii=False, default=str),
+                now,
+                row["record_key"],
+            ),
+        )
+        updated += 1
+
+    conn.commit()
+    return {
+        "margins": len(margins_df),
+        "stored_margins": stored_margins,
+        "matched": matched_rows,
+        "matched_margins": matched_margins,
+        "updated": updated,
+        "unchanged": unchanged,
+        "unmatched": max(len(margins_df) - matched_margins, 0),
+    }
+
+
+def _upsert_margin_records(
+    conn: sqlite3.Connection,
+    margins_df: pd.DataFrame,
+    source_file: str,
+    imported_at: str,
+) -> int:
+    stored = 0
+    for _, row in margins_df.iterrows():
+        row_dict = _clean_row(row.to_dict())
+        margin_key = make_record_key(
+            row_dict,
+            ["Contrato margen", "Concepto margen", "Fecha margen", "Importe margen"],
+        )
+        existing = conn.execute(
+            "SELECT data_json FROM margin_records WHERE margin_key = ?",
+            (margin_key,),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO margin_records (
+                    margin_key, data_json, source_file, first_imported_at, last_imported_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    margin_key,
+                    json.dumps(row_dict, ensure_ascii=False, default=str),
+                    source_file,
+                    imported_at,
+                    imported_at,
+                ),
+            )
+            stored += 1
+            continue
+
+        merged = _merge_rows(json.loads(existing["data_json"]), row_dict)
+        conn.execute(
+            """
+            UPDATE margin_records
+            SET data_json = ?, source_file = ?, last_imported_at = ?
+            WHERE margin_key = ?
+            """,
+            (
+                json.dumps(merged, ensure_ascii=False, default=str),
+                source_file,
+                imported_at,
+                margin_key,
+            ),
+        )
+        stored += 1
+    return stored
+
+
+def backfill_derived_fields(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute("SELECT record_key, data_json, row_hash FROM records").fetchall()
+    updated = 0
+
+    for row in rows:
+        data = json.loads(row["data_json"] or "{}")
+        enriched = add_derived_columns(pd.DataFrame([data])).iloc[0].to_dict()
+
+        if (
+            data.get("marca") == enriched.get("marca")
+            and data.get("tipo_operacion") == enriched.get("tipo_operacion")
+            and data.get("fecha_matriculacion") == enriched.get("fecha_matriculacion")
+        ):
+            continue
+
+        data["marca"] = enriched.get("marca")
+        data["tipo_operacion"] = enriched.get("tipo_operacion")
+        data["fecha_matriculacion"] = enriched.get("fecha_matriculacion")
+        if data.get("fecha_matriculacion"):
+            data["fecha"] = data.get("fecha_matriculacion")
+        row_hash = str(pd.util.hash_pandas_object(pd.Series(data), index=True).sum())
+
+        conn.execute(
+            """
+            UPDATE records
+            SET data_json = ?, row_hash = ?, last_imported_at = datetime('now')
+            WHERE record_key = ?
+            """,
+            (
+                json.dumps(data, ensure_ascii=False, default=str),
+                row_hash,
+                row["record_key"],
+            ),
+        )
+        updated += 1
+
+    if updated:
+        conn.commit()
+
+    return {"updated": updated, "total": len(rows)}
+
+
+def upsert_records(
+    conn: sqlite3.Connection,
+    df: pd.DataFrame,
+    source_file: str,
+    key_columns: Iterable[str],
+) -> dict[str, int]:
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    inserted = updated = unchanged = 0
+    key_columns = list(key_columns)
+
+    for _, row in df.iterrows():
+        row_dict = _clean_row(row.to_dict())
+        record_key = make_record_key(row_dict, key_columns)
+        row_hash = pd.util.hash_pandas_object(pd.Series(row_dict), index=True).sum()
+        row_hash = str(row_hash)
+
+        existing = conn.execute(
+            "SELECT data_json, row_hash FROM records WHERE record_key = ?",
+            (record_key,),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO records (
+                    record_key, fecha, factura, matricula, importe, cliente, producto,
+                    row_hash, data_json, source_file, first_imported_at, last_imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _record_values(record_key, row_dict, row_hash, source_file, now, now),
+            )
+            inserted += 1
+            continue
+
+        merged = _merge_rows(json.loads(existing["data_json"]), row_dict)
+        merged_hash = pd.util.hash_pandas_object(pd.Series(merged), index=True).sum()
+        merged_hash = str(merged_hash)
+
+        if merged_hash == existing["row_hash"]:
+            unchanged += 1
+            continue
+
+        conn.execute(
+            """
+            UPDATE records
+            SET fecha = ?, factura = ?, matricula = ?, importe = ?, cliente = ?,
+                producto = ?, row_hash = ?, data_json = ?, source_file = ?,
+                last_imported_at = ?
+            WHERE record_key = ?
+            """,
+            (
+                _as_text(merged.get("fecha")),
+                _as_text(merged.get("factura")),
+                _as_text(merged.get("matricula")),
+                _as_float(merged.get("importe")),
+                _as_text(merged.get("cliente")),
+                _as_text(merged.get("producto")),
+                merged_hash,
+                json.dumps(merged, ensure_ascii=False, default=str),
+                source_file,
+                now,
+                record_key,
+            ),
+        )
+        updated += 1
+
+    conn.execute(
+        """
+        INSERT INTO imports (
+            source_file, imported_at, total_rows, inserted_rows, updated_rows, unchanged_rows
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (source_file, now, len(df), inserted, updated, unchanged),
+    )
+    conn.commit()
+
+    return {
+        "total": len(df),
+        "inserted": inserted,
+        "updated": updated,
+        "unchanged": unchanged,
+    }
+
+
+def make_record_key(row: dict, key_columns: Iterable[str]) -> str:
+    values = [_as_text(row.get(column)).strip().upper() for column in key_columns]
+    values = [value for value in values if value]
+    if values:
+        return " | ".join(values)
+    return str(pd.util.hash_pandas_object(pd.Series(row), index=True).sum())
+
+
+def _record_values(
+    record_key: str,
+    row_dict: dict,
+    row_hash: str,
+    source_file: str,
+    first_imported_at: str,
+    last_imported_at: str,
+) -> tuple:
+    return (
+        record_key,
+        _as_text(row_dict.get("fecha_matriculacion") or row_dict.get("fecha")),
+        _as_text(row_dict.get("factura")),
+        _as_text(row_dict.get("matricula")),
+        _as_float(row_dict.get("importe")),
+        _as_text(row_dict.get("cliente")),
+        _as_text(row_dict.get("producto")),
+        row_hash,
+        json.dumps(row_dict, ensure_ascii=False, default=str),
+        source_file,
+        first_imported_at,
+        last_imported_at,
+    )
+
+
+def _merge_rows(existing: dict, incoming: dict) -> dict:
+    merged = existing.copy()
+    for key, value in incoming.items():
+        if _is_empty(value):
+            continue
+        if _is_empty(merged.get(key)) or merged.get(key) != value:
+            merged[key] = value
+    return merged
+
+
+def _clean_row(row: dict) -> dict:
+    return {key: (None if _is_empty(value) else value) for key, value in row.items()}
+
+
+def _is_empty(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ""
+
+
+def _as_text(value) -> str:
+    if _is_empty(value):
+        return ""
+    return str(value)
+
+
+def _as_float(value) -> float | None:
+    if _is_empty(value):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        text = str(value).replace("$", "").replace(" ", "")
+        if "," in text and "." in text:
+            if text.rfind(".") > text.rfind(","):
+                text = text.replace(",", "")
+            else:
+                text = text.replace(".", "").replace(",", ".")
+        elif "," in text:
+            text = text.replace(",", ".")
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _normalize_key(value) -> str:
+    if _is_empty(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return re_sub_digits(text)
+
+
+def _normalize_order(value) -> str:
+    text = _normalize_key(value)
+    return text.zfill(3) if text else ""
+
+
+def re_sub_digits(value: str) -> str:
+    return "".join(char for char in value if char.isdigit())
+
+
+def _split_margin_concepts(value) -> list[str]:
+    if _is_empty(value):
+        return []
+    return [item.strip() for item in str(value).split("|") if item.strip()]

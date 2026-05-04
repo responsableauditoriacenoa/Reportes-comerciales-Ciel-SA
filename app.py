@@ -140,7 +140,7 @@ def render_import(conn, compact: bool = False) -> None:
             )
             import_clicked = st.button("Importar y actualizar base", type="primary", width="stretch")
 
-    st.dataframe(normalized_df.head(50), width="stretch")
+    render_dataframe(normalized_df.head(50))
 
     if not key_columns:
         st.error("Elegi al menos una columna clave para poder solapar duplicados.")
@@ -391,7 +391,7 @@ def render_txt_import(conn, existing_records: pd.DataFrame, margin_records: pd.D
 
     st.subheader("Preview TXT")
     st.caption("El archivo se convierte a tabla y se guarda sin borrar datos historicos que ya no vengan en futuras importaciones.")
-    st.dataframe(normalized_df.head(80), width="stretch")
+    render_dataframe(normalized_df.head(80))
 
     with st.sidebar:
         with st.expander("Opciones TXT", expanded=True):
@@ -431,7 +431,7 @@ def render_margin_import(conn, margin_file) -> None:
         return
 
     st.caption("El cruce se realiza tomando los primeros 4 caracteres del contrato como Grupo y los 3 siguientes como Orden.")
-    st.dataframe(margins_df.head(50), width="stretch")
+    render_dataframe(margins_df.head(50))
 
     if st.button("Aplicar margenes a base TXT", type="primary", width="stretch"):
         result = apply_txt_margins(conn, margins_df, margin_file.name)
@@ -451,7 +451,7 @@ def render_txt_table(df: pd.DataFrame, margin_records: pd.DataFrame | None = Non
         mask = view.astype(str).apply(lambda column: column.str.contains(search, case=False, na=False)).any(axis=1)
         view = view[mask]
 
-    st.dataframe(view, width="stretch")
+    render_dataframe(view)
     st.download_button(
         "Descargar base TXT consolidada",
         data=view.to_csv(index=False).encode("utf-8-sig"),
@@ -486,7 +486,7 @@ def render_cuenta_h(conn, existing_records: pd.DataFrame) -> None:
             st.warning("No encontre movimientos de cuenta H en el TXT.")
         else:
             st.caption("Se importan movimientos reales de GL H y se excluyen encabezados/totales.")
-            st.dataframe(order_cuenta_h_columns(parsed_df).head(80), width="stretch")
+            render_dataframe(order_cuenta_h_columns(parsed_df).head(80))
             if st.button("Importar conciliacion cuenta H", type="primary", width="stretch"):
                 if upsert_cuenta_h_records is None:
                     st.error("La base de datos todavia no tiene habilitado el modulo Cuenta H. Reinicia la app y vuelve a intentar.")
@@ -527,7 +527,7 @@ def render_cuenta_h_table(df: pd.DataFrame) -> None:
         view = view[mask]
 
     render_cuenta_h_kpis(view)
-    st.dataframe(view, width="stretch")
+    render_dataframe(view)
 
     col1, col2 = st.columns(2)
     col1.download_button(
@@ -831,7 +831,7 @@ def render_data(records: pd.DataFrame) -> None:
         mask = df.astype(str).apply(lambda column: column.str.contains(search, case=False, na=False)).any(axis=1)
         df = df[mask]
 
-    st.dataframe(df, width="stretch")
+        render_dataframe(df)
 
 
 def render_history(conn) -> None:
@@ -843,19 +843,19 @@ def render_history(conn) -> None:
     if imports.empty:
         st.info("Todavia no hay importaciones Excel registradas.")
     else:
-        st.dataframe(imports, width="stretch")
+        render_dataframe(imports)
 
     st.subheader("Importaciones TXT")
     if txt_imports.empty:
         st.info("Todavia no hay importaciones TXT registradas.")
     else:
-        st.dataframe(txt_imports, width="stretch")
+        render_dataframe(txt_imports)
 
     st.subheader("Importaciones Cuenta H")
     if cuenta_h_imports.empty:
         st.info("Todavia no hay importaciones Cuenta H registradas.")
     else:
-        st.dataframe(cuenta_h_imports, width="stretch")
+        render_dataframe(cuenta_h_imports)
 
 
 def render_kpi_grid(cards: list[tuple[str, str, str, str]]) -> None:
@@ -872,6 +872,46 @@ def render_kpi_grid(cards: list[tuple[str, str, str, str]]) -> None:
             "</div>"
         )
     render_html(f"<div class='kpi-grid'>{''.join(html_cards)}</div>")
+
+
+def render_dataframe(df: pd.DataFrame) -> None:
+    st.dataframe(
+        df,
+        width="stretch",
+        column_config=money_column_config(df),
+    )
+
+
+def money_column_config(df: pd.DataFrame) -> dict:
+    config = {}
+    money_keywords = [
+        "importe",
+        "valor",
+        "debito",
+        "credito",
+        "saldo",
+        "margen",
+        "facturacion",
+        "total",
+    ]
+    excluded_columns = {
+        "f.valor",
+        "fecha valor",
+        "first_imported_at",
+        "last_imported_at",
+        "imported_at",
+        "last_imported_at",
+    }
+    for column in df.columns:
+        normalized = str(column).lower()
+        if normalized in excluded_columns or "imported_at" in normalized:
+            continue
+        if any(keyword in normalized for keyword in money_keywords):
+            config[column] = st.column_config.NumberColumn(
+                str(column),
+                format="$ %,.2f",
+            )
+    return config
 
 
 def render_html(html: str) -> None:

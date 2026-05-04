@@ -7,20 +7,7 @@ import plotly.express as px
 import streamlit as st
 
 from config import CANONICAL_COLUMNS, DEFAULT_KEY_COLUMNS
-from storage import (
-    get_connection,
-    load_imports,
-    load_records,
-    load_txt_imports,
-    load_txt_records,
-    load_margin_records,
-    load_cuenta_h_imports,
-    load_cuenta_h_records,
-    apply_txt_margins,
-    upsert_cuenta_h_records,
-    upsert_records,
-    upsert_txt_records,
-)
+import storage as db
 from transform import (
     available_key_columns,
     default_txt_key_columns,
@@ -32,6 +19,19 @@ from transform import (
     read_excel,
     read_txt_table,
 )
+
+get_connection = db.get_connection
+load_imports = db.load_imports
+load_records = db.load_records
+load_txt_imports = db.load_txt_imports
+load_txt_records = db.load_txt_records
+load_margin_records = getattr(db, "load_margin_records", lambda conn: pd.DataFrame())
+load_cuenta_h_imports = getattr(db, "load_cuenta_h_imports", lambda conn: pd.DataFrame())
+load_cuenta_h_records = getattr(db, "load_cuenta_h_records", lambda conn: pd.DataFrame())
+apply_txt_margins = db.apply_txt_margins
+upsert_cuenta_h_records = getattr(db, "upsert_cuenta_h_records", None)
+upsert_records = db.upsert_records
+upsert_txt_records = db.upsert_txt_records
 
 
 st.set_page_config(
@@ -488,6 +488,9 @@ def render_cuenta_h(conn, existing_records: pd.DataFrame) -> None:
             st.caption("Se importan movimientos reales de GL H y se excluyen encabezados/totales.")
             st.dataframe(order_cuenta_h_columns(parsed_df).head(80), width="stretch")
             if st.button("Importar conciliacion cuenta H", type="primary", width="stretch"):
+                if upsert_cuenta_h_records is None:
+                    st.error("La base de datos todavia no tiene habilitado el modulo Cuenta H. Reinicia la app y vuelve a intentar.")
+                    return
                 result = upsert_cuenta_h_records(
                     conn,
                     parsed_df,

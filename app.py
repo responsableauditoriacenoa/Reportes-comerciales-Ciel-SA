@@ -14,7 +14,10 @@ from storage import (
     load_txt_imports,
     load_txt_records,
     load_margin_records,
+    load_cuenta_h_imports,
+    load_cuenta_h_records,
     apply_txt_margins,
+    upsert_cuenta_h_records,
     upsert_records,
     upsert_txt_records,
 )
@@ -24,6 +27,7 @@ from transform import (
     infer_column_mapping,
     normalize_dataframe,
     normalize_txt_dataframe,
+    read_cuenta_h_txt,
     read_htm_margins,
     read_excel,
     read_txt_table,
@@ -44,6 +48,7 @@ def main() -> None:
     records = load_records(conn)
     txt_records = load_txt_records(conn)
     margin_records = load_margin_records(conn)
+    cuenta_h_records = load_cuenta_h_records(conn)
 
     with st.sidebar:
         st.markdown("## Reporting")
@@ -51,13 +56,14 @@ def main() -> None:
         st.markdown("<div class='sidebar-nav'>", unsafe_allow_html=True)
         section = st.radio(
             "Menu",
-            ["KPIs", "Base de datos Comisiones Margenes", "Historial"],
+            ["KPIs", "Base de datos Comisiones Margenes", "Conciliacion cuenta H", "Historial"],
             label_visibility="collapsed",
         )
         st.markdown("</div>", unsafe_allow_html=True)
         st.divider()
         st.metric("Registros guardados", f"{len(records):,.0f}")
         st.metric("Registros TXT", f"{len(txt_records):,.0f}")
+        st.metric("Movimientos H", f"{len(cuenta_h_records):,.0f}")
 
     render_html(
         "<div class='page-hero'>"
@@ -71,6 +77,8 @@ def main() -> None:
 
     if section == "Base de datos Comisiones Margenes":
         render_txt_import(conn, txt_records, margin_records)
+    elif section == "Conciliacion cuenta H":
+        render_cuenta_h(conn, cuenta_h_records)
     elif section == "KPIs":
         render_import(conn, compact=True)
         render_dashboard(records)
@@ -461,6 +469,141 @@ def render_txt_table(df: pd.DataFrame, margin_records: pd.DataFrame | None = Non
     render_txt_kpis(view, margin_records)
 
 
+def render_cuenta_h(conn, existing_records: pd.DataFrame) -> None:
+    with st.sidebar:
+        with st.expander("Importacion Cuenta H", expanded=True):
+            uploaded_file = st.file_uploader(
+                "Archivo TXT cuenta H",
+                type=["txt"],
+                accept_multiple_files=False,
+                key="cuenta_h_uploader",
+            )
+
+    if uploaded_file is not None:
+        parsed_df = read_cuenta_h_txt(uploaded_file)
+        st.subheader("Preview conciliacion cuenta H")
+        if parsed_df.empty:
+            st.warning("No encontre movimientos de cuenta H en el TXT.")
+        else:
+            st.caption("Se importan movimientos reales de GL H y se excluyen encabezados/totales.")
+            st.dataframe(order_cuenta_h_columns(parsed_df).head(80), width="stretch")
+            if st.button("Importar conciliacion cuenta H", type="primary", width="stretch"):
+                result = upsert_cuenta_h_records(
+                    conn,
+                    parsed_df,
+                    uploaded_file.name,
+                    ["Cuenta", "GL", "N.Doc.", "Tipo", "F.Comp."],
+                )
+                st.success(
+                    "Importacion cuenta H completa: "
+                    f"{result['inserted']} nuevas, {result['updated']} actualizadas, "
+                    f"{result['unchanged']} sin cambios."
+                )
+                existing_records = load_cuenta_h_records(conn)
+
+    st.subheader("Conciliacion cuenta H")
+    if existing_records.empty:
+        st.info("Subi un TXT de cuenta H desde el panel lateral para crear la base consolidada.")
+        return
+
+    render_cuenta_h_table(existing_records)
+
+
+def render_cuenta_h_table(df: pd.DataFrame) -> None:
+    with st.sidebar:
+        with st.expander("Filtros Cuenta H", expanded=True):
+            concepts = sorted([item for item in df.get("Concepto", pd.Series(dtype=object)).dropna().astype(str).unique() if item])
+            selected_concepts = st.multiselect("Concepto", options=concepts, default=concepts)
+            search = st.text_input("Buscar movimiento H")
+
+    view = order_cuenta_h_columns(df.copy())
+    if selected_concepts and "Concepto" in view.columns:
+        view = view[view["Concepto"].isin(selected_concepts)]
+    if search:
+        mask = view.astype(str).apply(lambda column: column.str.contains(search, case=False, na=False)).any(axis=1)
+        view = view[mask]
+
+    render_cuenta_h_kpis(view)
+    st.dataframe(view, width="stretch")
+
+    col1, col2 = st.columns(2)
+    col1.download_button(
+        "Descargar conciliacion H CSV",
+        data=view.to_csv(index=False).encode("utf-8-sig"),
+        file_name="conciliacion_cuenta_h.csv",
+        mime="text/csv",
+        width="stretch",
+    )
+    col2.download_button(
+        "Descargar conciliacion H Excel",
+        data=to_excel_bytes(view, sheet_name="Cuenta H"),
+        file_name="conciliacion_cuenta_h.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+
+
+def render_cuenta_h_kpis(df: pd.DataFrame) -> None:
+    debito = pd.to_numeric(df.get("Debito", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    credito = pd.to_numeric(df.get("Credito", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    saldo = credito - debito
+    render_kpi_grid(
+        [
+            ("Movimientos H", _format_number(len(df)), "Base consolidada filtrada", "primary"),
+            ("Debitos", _format_currency(debito), "Total debe", "indigo"),
+            ("Creditos", _format_currency(credito), "Total haber", "sky"),
+            ("Saldo neto", _format_currency(saldo), "Creditos - debitos", "cyan"),
+        ]
+    )
+
+    if "Concepto" not in df.columns:
+        return
+    by_concept = (
+        df.assign(Debito=pd.to_numeric(df["Debito"], errors="coerce").fillna(0), Credito=pd.to_numeric(df["Credito"], errors="coerce").fillna(0))
+        .groupby("Concepto", as_index=False)
+        .agg(debito=("Debito", "sum"), credito=("Credito", "sum"), movimientos=("Concepto", "size"))
+    )
+    if by_concept.empty:
+        return
+    by_concept["saldo"] = by_concept["credito"] - by_concept["debito"]
+    chart = px.bar(
+        by_concept.sort_values("saldo", ascending=True),
+        x="saldo",
+        y="Concepto",
+        orientation="h",
+        title="Saldo por concepto cuenta H",
+        text="saldo",
+        color="saldo",
+        color_continuous_scale=["#ef4444", "#dbeafe", "#2563eb"],
+    )
+    chart.update_traces(texttemplate="$%{text:,.0f}", textposition="outside", marker_line_color="#ffffff", marker_line_width=1.2)
+    style_chart(chart, x_title="Saldo", y_title="", show_coloraxis=False, height=520)
+    st.plotly_chart(chart, width="stretch")
+
+
+def order_cuenta_h_columns(df: pd.DataFrame) -> pd.DataFrame:
+    preferred = [
+        "Concepto",
+        "Texto",
+        "Cuenta",
+        "GL",
+        "N.Doc.",
+        "Tipo",
+        "N.Fac",
+        "Debito",
+        "Credito",
+        "Saldo",
+        "F.Comp.",
+        "F.Valor",
+        "F.Venc.",
+        "Debito U$",
+        "Credito U$",
+    ]
+    ordered = [column for column in preferred if column in df.columns]
+    rest = [column for column in df.columns if column not in ordered]
+    return df[ordered + rest]
+
+
 def order_txt_columns(df: pd.DataFrame) -> pd.DataFrame:
     margin_columns = [
         "Margen total",
@@ -691,6 +834,7 @@ def render_data(records: pd.DataFrame) -> None:
 def render_history(conn) -> None:
     imports = load_imports(conn)
     txt_imports = load_txt_imports(conn)
+    cuenta_h_imports = load_cuenta_h_imports(conn)
 
     st.subheader("Importaciones Excel")
     if imports.empty:
@@ -703,6 +847,12 @@ def render_history(conn) -> None:
         st.info("Todavia no hay importaciones TXT registradas.")
     else:
         st.dataframe(txt_imports, width="stretch")
+
+    st.subheader("Importaciones Cuenta H")
+    if cuenta_h_imports.empty:
+        st.info("Todavia no hay importaciones Cuenta H registradas.")
+    else:
+        st.dataframe(cuenta_h_imports, width="stretch")
 
 
 def render_kpi_grid(cards: list[tuple[str, str, str, str]]) -> None:

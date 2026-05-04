@@ -89,6 +89,75 @@ def read_htm_margins(file) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def read_cuenta_h_txt(file) -> pd.DataFrame:
+    content = _read_file_content(file)
+    rows = []
+    for line in content.splitlines():
+        parts = re.split(r"\s{2,}", line.strip())
+        if len(parts) < 12 or not re.match(r"^\d{8}$", parts[0]):
+            continue
+        if "**" in line or "Tot." in line:
+            continue
+
+        parsed = _parse_cuenta_h_parts(parts)
+        if parsed is None or parsed.get("GL") != "H":
+            continue
+        rows.append(parsed)
+
+    return pd.DataFrame(rows)
+
+
+def _parse_cuenta_h_parts(parts: list[str]) -> dict | None:
+    if len(parts) == 12:
+        cuenta, gl, n_doc, tipo, texto, debito, credito, debito_usd, credito_usd, f_comp, f_valor, f_venc = parts
+        n_factura = ""
+    elif len(parts) >= 13:
+        cuenta, gl, n_doc, tipo, texto, n_factura, debito, credito, debito_usd, credito_usd, f_comp, f_valor, f_venc = parts[:13]
+    else:
+        return None
+
+    return {
+        "Cuenta": cuenta,
+        "GL": gl,
+        "N.Doc.": n_doc,
+        "Tipo": tipo,
+        "Texto": texto,
+        "Concepto": infer_cuenta_h_concept(texto),
+        "N.Fac": n_factura,
+        "Debito": _parse_amount(debito),
+        "Credito": _parse_amount(credito),
+        "Saldo": (_parse_amount(credito) or 0) - (_parse_amount(debito) or 0),
+        "Debito U$": _parse_amount(debito_usd),
+        "Credito U$": _parse_amount(credito_usd),
+        "F.Comp.": _parse_compact_date(f_comp),
+        "F.Valor": _parse_compact_date(f_valor),
+        "F.Venc.": _parse_compact_date(f_venc),
+    }
+
+
+def infer_cuenta_h_concept(text: str) -> str:
+    normalized = _normalize_text(text)
+    if "FLETE" in normalized:
+        return "Flete"
+    if "FORMULARIO 01" in normalized:
+        return "Formulario 01"
+    if "BONIF" in normalized or "BONO" in normalized:
+        return "Bonificaciones"
+    if "PAGO SALDO" in normalized:
+        return "Pago saldo"
+    if "TRANSFERENCIA SALDOS" in normalized:
+        return "Transferencia saldos"
+    if "COMP PP" in normalized or "COMPENSACION" in normalized:
+        return "Compensaciones"
+    if "LICENCIAS SALESFORCE" in normalized:
+        return "Licencias Salesforce"
+    if "DESCUENTO" in normalized:
+        return "Descuentos"
+    if "RECUPERO" in normalized:
+        return "Recuperos"
+    return text.strip() if text else "Otros"
+
+
 def default_txt_key_columns(df: pd.DataFrame) -> list[str]:
     preferred = ["Nro.Orden", "VIN"]
     keys = [column for column in preferred if column in df.columns and df[column].notna().any()]
@@ -152,6 +221,22 @@ def _parse_date_text(value) -> str | None:
     if pd.isna(parsed):
         return None
     return str(parsed.date())
+
+
+def _parse_compact_date(value) -> str | None:
+    text = str(value or "").strip()
+    if not re.match(r"^\d{6}$", text):
+        return None
+    parsed = pd.to_datetime(text, format="%y%m%d", errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return str(parsed.date())
+
+
+def _normalize_text(value) -> str:
+    value = str(value or "").strip().upper()
+    value = unicodedata.normalize("NFKD", value)
+    return "".join(char for char in value if not unicodedata.combining(char))
 
 
 def normalize_dataframe(df: pd.DataFrame, column_mapping: dict[str, str] | None = None) -> pd.DataFrame:

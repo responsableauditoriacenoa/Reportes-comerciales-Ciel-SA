@@ -8,19 +8,23 @@ import streamlit as st
 
 from config import CANONICAL_COLUMNS, DEFAULT_KEY_COLUMNS
 import storage as db
-from transform import (
-    available_key_columns,
-    default_subscription_key_columns,
-    default_txt_key_columns,
-    infer_column_mapping,
-    normalize_dataframe,
-    normalize_subscriptions_dataframe,
-    normalize_txt_dataframe,
-    read_subscription_file,
-    read_cuenta_h_txt,
-    read_htm_margins,
-    read_excel,
-    read_txt_table,
+import transform as tf
+
+available_key_columns = tf.available_key_columns
+default_txt_key_columns = tf.default_txt_key_columns
+infer_column_mapping = tf.infer_column_mapping
+normalize_dataframe = tf.normalize_dataframe
+normalize_txt_dataframe = tf.normalize_txt_dataframe
+read_cuenta_h_txt = getattr(tf, "read_cuenta_h_txt", lambda file: pd.DataFrame())
+read_htm_margins = tf.read_htm_margins
+read_excel = tf.read_excel
+read_txt_table = tf.read_txt_table
+read_subscription_file = getattr(tf, "read_subscription_file", read_txt_table)
+normalize_subscriptions_dataframe = getattr(tf, "normalize_subscriptions_dataframe", lambda df: df)
+default_subscription_key_columns = getattr(
+    tf,
+    "default_subscription_key_columns",
+    lambda df: [column for column in df.columns if df[column].notna().any()][:3],
 )
 
 get_connection = db.get_connection

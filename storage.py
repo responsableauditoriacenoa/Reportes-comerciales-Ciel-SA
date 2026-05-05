@@ -121,6 +121,40 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_records (
+            record_key TEXT PRIMARY KEY,
+            row_hash TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            source_file TEXT,
+            first_imported_at TEXT NOT NULL,
+            last_imported_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_file TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            total_rows INTEGER NOT NULL,
+            inserted_rows INTEGER NOT NULL,
+            updated_rows INTEGER NOT NULL,
+            unchanged_rows INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_objectives (
+            periodo TEXT PRIMARY KEY,
+            objetivo INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -195,6 +229,111 @@ def load_cuenta_h_imports(conn: sqlite3.Connection) -> pd.DataFrame:
         "SELECT * FROM cuenta_h_imports ORDER BY imported_at DESC, id DESC",
         conn,
     )
+
+
+def load_subscription_records(conn: sqlite3.Connection) -> pd.DataFrame:
+    rows = conn.execute("SELECT * FROM subscription_records").fetchall()
+    if not rows:
+        return pd.DataFrame()
+
+    decoded = []
+    for row in rows:
+        base = dict(row)
+        data = json.loads(base.pop("data_json") or "{}")
+        decoded.append({**data, **base})
+    return pd.DataFrame(decoded)
+
+
+def load_subscription_imports(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT * FROM subscription_imports ORDER BY imported_at DESC, id DESC",
+        conn,
+    )
+
+
+def load_subscription_objectives(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT * FROM subscription_objectives ORDER BY periodo DESC",
+        conn,
+    )
+
+
+def save_subscription_objective(conn: sqlite3.Connection, periodo: str, objetivo: int) -> None:
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO subscription_objectives (periodo, objetivo, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(periodo) DO UPDATE SET objetivo = excluded.objetivo, updated_at = excluded.updated_at
+        """,
+        (periodo, int(objetivo), now),
+    )
+    conn.commit()
+
+
+def upsert_subscription_records(
+    conn: sqlite3.Connection,
+    df: pd.DataFrame,
+    source_file: str,
+    key_columns: Iterable[str],
+) -> dict[str, int]:
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    inserted = updated = unchanged = 0
+    key_columns = list(key_columns)
+
+    for _, row in df.iterrows():
+        row_dict = _clean_row(row.to_dict())
+        record_key = make_record_key(row_dict, key_columns)
+        row_hash = str(pd.util.hash_pandas_object(pd.Series(row_dict), index=True).sum())
+        existing = conn.execute(
+            "SELECT data_json, row_hash FROM subscription_records WHERE record_key = ?",
+            (record_key,),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO subscription_records (
+                    record_key, row_hash, data_json, source_file, first_imported_at, last_imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (record_key, row_hash, json.dumps(row_dict, ensure_ascii=False, default=str), source_file, now, now),
+            )
+            inserted += 1
+            continue
+
+        merged = _merge_rows(json.loads(existing["data_json"]), row_dict)
+        merged_hash = str(pd.util.hash_pandas_object(pd.Series(merged), index=True).sum())
+        if merged_hash == existing["row_hash"]:
+            unchanged += 1
+            continue
+
+        conn.execute(
+            """
+            UPDATE subscription_records
+            SET row_hash = ?, data_json = ?, source_file = ?, last_imported_at = ?
+            WHERE record_key = ?
+            """,
+            (merged_hash, json.dumps(merged, ensure_ascii=False, default=str), source_file, now, record_key),
+        )
+        updated += 1
+
+    conn.execute(
+        """
+        INSERT INTO subscription_imports (
+            source_file, imported_at, total_rows, inserted_rows, updated_rows, unchanged_rows
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (source_file, now, len(df), inserted, updated, unchanged),
+    )
+    conn.commit()
+
+    return {
+        "total": len(df),
+        "inserted": inserted,
+        "updated": updated,
+        "unchanged": unchanged,
+    }
 
 
 def upsert_cuenta_h_records(

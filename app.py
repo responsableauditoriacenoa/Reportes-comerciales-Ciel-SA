@@ -10,10 +10,13 @@ from config import CANONICAL_COLUMNS, DEFAULT_KEY_COLUMNS
 import storage as db
 from transform import (
     available_key_columns,
+    default_subscription_key_columns,
     default_txt_key_columns,
     infer_column_mapping,
     normalize_dataframe,
+    normalize_subscriptions_dataframe,
     normalize_txt_dataframe,
+    read_subscription_file,
     read_cuenta_h_txt,
     read_htm_margins,
     read_excel,
@@ -28,9 +31,14 @@ load_txt_records = db.load_txt_records
 load_margin_records = getattr(db, "load_margin_records", lambda conn: pd.DataFrame())
 load_cuenta_h_imports = getattr(db, "load_cuenta_h_imports", lambda conn: pd.DataFrame())
 load_cuenta_h_records = getattr(db, "load_cuenta_h_records", lambda conn: pd.DataFrame())
+load_subscription_imports = getattr(db, "load_subscription_imports", lambda conn: pd.DataFrame())
+load_subscription_objectives = getattr(db, "load_subscription_objectives", lambda conn: pd.DataFrame())
+load_subscription_records = getattr(db, "load_subscription_records", lambda conn: pd.DataFrame())
 apply_txt_margins = db.apply_txt_margins
+save_subscription_objective = getattr(db, "save_subscription_objective", None)
 upsert_cuenta_h_records = getattr(db, "upsert_cuenta_h_records", None)
 upsert_records = db.upsert_records
+upsert_subscription_records = getattr(db, "upsert_subscription_records", None)
 upsert_txt_records = db.upsert_txt_records
 
 
@@ -49,6 +57,7 @@ def main() -> None:
     txt_records = load_txt_records(conn)
     margin_records = load_margin_records(conn)
     cuenta_h_records = load_cuenta_h_records(conn)
+    subscription_records = load_subscription_records(conn)
 
     with st.sidebar:
         st.markdown("## Reporting")
@@ -56,7 +65,7 @@ def main() -> None:
         st.markdown("<div class='sidebar-nav'>", unsafe_allow_html=True)
         section = st.radio(
             "Menu",
-            ["KPIs", "Base de datos Comisiones Margenes", "Conciliacion cuenta H", "Historial"],
+            ["KPIs", "Base de datos Comisiones Margenes", "Conciliacion cuenta H", "Suscripciones", "Historial"],
             label_visibility="collapsed",
         )
         st.markdown("</div>", unsafe_allow_html=True)
@@ -64,6 +73,7 @@ def main() -> None:
         st.metric("Registros guardados", f"{len(records):,.0f}")
         st.metric("Registros TXT", f"{len(txt_records):,.0f}")
         st.metric("Movimientos H", f"{len(cuenta_h_records):,.0f}")
+        st.metric("Suscripciones", f"{len(subscription_records):,.0f}")
 
     render_html(
         "<div class='page-hero'>"
@@ -79,6 +89,8 @@ def main() -> None:
         render_txt_import(conn, txt_records, margin_records)
     elif section == "Conciliacion cuenta H":
         render_cuenta_h(conn, cuenta_h_records)
+    elif section == "Suscripciones":
+        render_subscriptions(conn, subscription_records)
     elif section == "KPIs":
         render_import(conn, compact=True)
         render_dashboard(records)
@@ -584,6 +596,135 @@ def render_cuenta_h_kpis(df: pd.DataFrame) -> None:
     st.plotly_chart(chart, width="stretch")
 
 
+def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
+    objectives = load_subscription_objectives(conn)
+    with st.sidebar:
+        with st.expander("Importacion Suscripciones", expanded=True):
+            uploaded_file = st.file_uploader(
+                "Archivo Suscripciones",
+                type=["xlsx", "xls", "csv", "txt"],
+                accept_multiple_files=False,
+                key="subscriptions_uploader",
+            )
+        with st.expander("Objetivo mensual", expanded=True):
+            objective_month = st.date_input("Mes objetivo", value=pd.Timestamp.today().date(), key="subscription_objective_month")
+            objective_value = st.number_input("Objetivo", min_value=0, step=1, key="subscription_objective_value")
+            save_objective = st.button("Guardar objetivo", type="primary", width="stretch")
+
+    if save_objective:
+        if save_subscription_objective is None:
+            st.error("El modulo de objetivos todavia no esta disponible en la base. Reinicia la app y vuelve a intentar.")
+        else:
+            periodo = pd.Timestamp(objective_month).to_period("M").strftime("%Y-%m")
+            save_subscription_objective(conn, periodo, int(objective_value))
+            st.success(f"Objetivo guardado para {periodo}: {int(objective_value):,.0f}")
+            objectives = load_subscription_objectives(conn)
+
+    if uploaded_file is not None:
+        raw_df = read_subscription_file(uploaded_file)
+        normalized_df = normalize_subscriptions_dataframe(raw_df)
+        st.subheader("Preview Suscripciones")
+        render_dataframe(normalized_df.head(80))
+
+        with st.sidebar:
+            with st.expander("Opciones Suscripciones", expanded=True):
+                key_columns = st.multiselect(
+                    "Columnas para detectar duplicados",
+                    options=list(normalized_df.columns),
+                    default=default_subscription_key_columns(normalized_df),
+                    key="subscription_key_columns",
+                )
+                import_clicked = st.button("Importar suscripciones", type="primary", width="stretch")
+
+        if import_clicked:
+            if upsert_subscription_records is None:
+                st.error("El modulo Suscripciones todavia no esta disponible en la base. Reinicia la app y vuelve a intentar.")
+            elif not key_columns:
+                st.error("Elegi al menos una columna clave.")
+            else:
+                result = upsert_subscription_records(conn, normalized_df, uploaded_file.name, key_columns)
+                st.success(
+                    "Importacion suscripciones completa: "
+                    f"{result['inserted']} nuevas, {result['updated']} actualizadas, "
+                    f"{result['unchanged']} sin cambios."
+                )
+                existing_records = load_subscription_records(conn)
+
+    st.subheader("Suscripciones")
+    if existing_records.empty:
+        st.info("Subi un archivo de suscripciones desde el panel lateral para crear la base consolidada.")
+        if not objectives.empty:
+            st.subheader("Objetivos cargados")
+            render_dataframe(objectives)
+        return
+
+    render_subscriptions_dashboard(existing_records, objectives)
+
+
+def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -> None:
+    view = df.copy()
+    view["fecha_ingreso"] = pd.to_datetime(view["fecha_ingreso"], errors="coerce")
+    min_date = view["fecha_ingreso"].min()
+    max_date = view["fecha_ingreso"].max()
+
+    with st.sidebar:
+        with st.expander("Filtros Suscripciones", expanded=True):
+            if pd.notna(min_date) and pd.notna(max_date):
+                selected_range = st.date_input("Fecha de ingreso", value=(min_date.date(), max_date.date()), key="subscription_date_filter")
+                if len(selected_range) == 2:
+                    start, end = selected_range
+                    view = view[(view["fecha_ingreso"].dt.date >= start) & (view["fecha_ingreso"].dt.date <= end)]
+            brands = sorted([item for item in view["marca"].dropna().astype(str).unique() if item])
+            selected_brands = st.multiselect("Marca", brands, default=brands, key="subscription_brand_filter")
+            if selected_brands:
+                view = view[view["marca"].isin(selected_brands)]
+
+    by_month = view.dropna(subset=["fecha_ingreso"]).assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
+    objective_total = 0
+    if not objectives.empty and not by_month.empty:
+        objective_total = objectives[objectives["periodo"].isin(set(by_month["periodo"].unique()))]["objetivo"].sum()
+    compliance = (len(view) / objective_total * 100) if objective_total else 0
+
+    render_kpi_grid(
+        [
+            ("Suscripciones", _format_number(len(view)), "Segun fecha de ingreso", "primary"),
+            ("Objetivo", _format_number(objective_total), "Meses filtrados", "sky"),
+            ("% Cumplimiento", f"{compliance:,.1f}%", "Suscripciones / objetivo", "indigo"),
+            ("Vendedores", _format_number(view["vendedor"].replace("", pd.NA).nunique()), "Activos en filtro", "cyan"),
+        ]
+    )
+
+    col1, col2 = st.columns(2)
+    by_brand = view.groupby("marca", as_index=False).size().rename(columns={"size": "suscripciones"})
+    if not by_brand.empty:
+        brand_chart = px.bar(by_brand, x="marca", y="suscripciones", text="suscripciones", title="Q de suscripciones por marca")
+        brand_chart.update_traces(textposition="outside", marker_color="#2563eb")
+        style_chart(brand_chart, x_title="Marca", y_title="Suscripciones", show_legend=False)
+        col1.plotly_chart(brand_chart, width="stretch")
+
+    by_seller = view.groupby("vendedor", as_index=False).size().rename(columns={"size": "suscripciones"}).sort_values("suscripciones", ascending=True)
+    if not by_seller.empty:
+        seller_chart = px.bar(by_seller, x="suscripciones", y="vendedor", orientation="h", text="suscripciones", title="Q de suscripciones por vendedor")
+        seller_chart.update_traces(textposition="outside", marker_color="#0ea5e9")
+        style_chart(seller_chart, x_title="Suscripciones", y_title="", show_legend=False, height=480)
+        col2.plotly_chart(seller_chart, width="stretch")
+
+    trend = by_month.groupby("periodo", as_index=False).size().rename(columns={"size": "suscripciones"})
+    if not trend.empty:
+        trend["periodo_label"] = pd.to_datetime(trend["periodo"] + "-01").dt.strftime("%b %Y")
+        trend_chart = px.line(trend, x="periodo_label", y="suscripciones", markers=True, text="suscripciones", title="Tendencia por mes de fecha de ingreso")
+        trend_chart.update_traces(line_width=4, marker_size=10, textposition="top center")
+        style_chart(trend_chart, x_title="Mes de ingreso", y_title="Suscripciones")
+        trend_chart.update_xaxes(type="category")
+        st.plotly_chart(trend_chart, width="stretch")
+
+    st.subheader("Base suscripciones consolidada")
+    render_dataframe(view)
+    c1, c2 = st.columns(2)
+    c1.download_button("Descargar suscripciones CSV", view.to_csv(index=False).encode("utf-8-sig"), "suscripciones.csv", "text/csv", width="stretch")
+    c2.download_button("Descargar suscripciones Excel", to_excel_bytes(view, "Suscripciones"), "suscripciones.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+
+
 def order_cuenta_h_columns(df: pd.DataFrame) -> pd.DataFrame:
     preferred = [
         "Concepto",
@@ -855,6 +996,7 @@ def render_history(conn) -> None:
     imports = load_imports(conn)
     txt_imports = load_txt_imports(conn)
     cuenta_h_imports = load_cuenta_h_imports(conn)
+    subscription_imports = load_subscription_imports(conn)
 
     st.subheader("Importaciones Excel")
     if imports.empty:
@@ -873,6 +1015,12 @@ def render_history(conn) -> None:
         st.info("Todavia no hay importaciones Cuenta H registradas.")
     else:
         render_dataframe(cuenta_h_imports)
+
+    st.subheader("Importaciones Suscripciones")
+    if subscription_imports.empty:
+        st.info("Todavia no hay importaciones Suscripciones registradas.")
+    else:
+        render_dataframe(subscription_imports)
 
 
 def render_kpi_grid(cards: list[tuple[str, str, str, str]]) -> None:

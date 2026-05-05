@@ -166,6 +166,50 @@ def default_txt_key_columns(df: pd.DataFrame) -> list[str]:
     return [column for column in df.columns if df[column].notna().any()][:2]
 
 
+def read_subscription_file(file) -> pd.DataFrame:
+    name = getattr(file, "name", "").lower()
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(file, dtype=object)
+    return read_txt_table(file)
+
+
+def normalize_subscriptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.dropna(how="all").copy()
+    df.columns = [str(column).strip() for column in df.columns]
+    rename_map = {}
+    normalized_lookup = {_normalize_column_name(column): column for column in df.columns}
+
+    aliases = {
+        "fecha_ingreso": ["fecha_ingreso", "fecha ingreso", "f_ingreso", "ingreso", "fecha"],
+        "marca": ["marca", "brand"],
+        "vendedor": ["vendedor", "asesor", "comercial", "salesperson"],
+    }
+    for target, candidates in aliases.items():
+        for candidate in candidates:
+            source = normalized_lookup.get(_normalize_column_name(candidate))
+            if source:
+                rename_map[source] = target
+                break
+
+    df = df.rename(columns=rename_map)
+    for column in ["fecha_ingreso", "marca", "vendedor"]:
+        if column not in df.columns:
+            df[column] = None
+
+    df["fecha_ingreso"] = pd.to_datetime(df["fecha_ingreso"], dayfirst=True, errors="coerce").dt.date.astype("string")
+    df["marca"] = df["marca"].astype("string").str.strip().str.title()
+    df["vendedor"] = df["vendedor"].astype("string").str.strip().str.title()
+    return df
+
+
+def default_subscription_key_columns(df: pd.DataFrame) -> list[str]:
+    preferred = ["fecha_ingreso", "marca", "vendedor"]
+    candidates = [column for column in preferred if column in df.columns and df[column].notna().any()]
+    if len(candidates) >= 2:
+        return candidates
+    return [column for column in df.columns if df[column].notna().any()][:3]
+
+
 class _TableCellParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()

@@ -897,6 +897,7 @@ def money_column_config(df: pd.DataFrame) -> dict:
     excluded_columns = {
         "f.valor",
         "fecha valor",
+        "contrato margen",
         "first_imported_at",
         "last_imported_at",
         "imported_at",

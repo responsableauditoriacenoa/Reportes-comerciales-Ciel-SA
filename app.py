@@ -446,7 +446,7 @@ def render_margin_import(conn, margin_file) -> None:
 
 def render_txt_table(df: pd.DataFrame, margin_records: pd.DataFrame | None = None) -> None:
     search = st.text_input("Buscar en base TXT", key="txt_search")
-    view = order_txt_columns(df.copy())
+    view = order_txt_by_approval_date(order_txt_columns(df.copy()))
     if search:
         mask = view.astype(str).apply(lambda column: column.str.contains(search, case=False, na=False)).any(axis=1)
         view = view[mask]
@@ -633,6 +633,23 @@ def order_txt_columns(df: pd.DataFrame) -> pd.DataFrame:
     insert_position = base_columns.index(insert_after) + 1
     ordered = base_columns[:insert_position] + visible_margin_columns + base_columns[insert_position:]
     return df[ordered]
+
+
+def order_txt_by_approval_date(df: pd.DataFrame) -> pd.DataFrame:
+    if "Fecha Aprobacion" not in df.columns:
+        return df
+
+    sorted_df = df.copy()
+    sorted_df["_fecha_aprobacion_sort"] = pd.to_datetime(
+        sorted_df["Fecha Aprobacion"],
+        errors="coerce",
+    )
+    sorted_df = sorted_df.sort_values(
+        by=["_fecha_aprobacion_sort", "Nro.Orden" if "Nro.Orden" in sorted_df.columns else "_fecha_aprobacion_sort"],
+        ascending=[False, False],
+        na_position="last",
+    )
+    return sorted_df.drop(columns=["_fecha_aprobacion_sort"])
 
 
 def render_txt_kpis(df: pd.DataFrame, margin_records: pd.DataFrame | None = None) -> None:

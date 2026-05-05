@@ -611,7 +611,15 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
                 key="subscriptions_uploader",
             )
         with st.expander("Objetivo mensual", expanded=True):
-            objective_month = st.date_input("Mes objetivo", value=pd.Timestamp.today().date(), key="subscription_objective_month")
+            current_year = int(pd.Timestamp.today().year)
+            objective_year = st.selectbox("Año objetivo", list(range(current_year - 3, current_year + 2)), index=3, key="subscription_objective_year")
+            objective_month = st.selectbox(
+                "Mes objetivo",
+                options=list(range(1, 13)),
+                index=int(pd.Timestamp.today().month) - 1,
+                format_func=lambda month: month_name_es(month),
+                key="subscription_objective_month",
+            )
             objective_value = st.number_input("Objetivo", min_value=0, step=1, key="subscription_objective_value")
             save_objective = st.button("Guardar objetivo", type="primary", width="stretch")
 
@@ -619,7 +627,7 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
         if save_subscription_objective is None:
             st.error("El modulo de objetivos todavia no esta disponible en la base. Reinicia la app y vuelve a intentar.")
         else:
-            periodo = pd.Timestamp(objective_month).to_period("M").strftime("%Y-%m")
+            periodo = f"{objective_year}-{int(objective_month):02d}"
             save_subscription_objective(conn, periodo, int(objective_value))
             st.success(f"Objetivo guardado para {periodo}: {int(objective_value):,.0f}")
             objectives = load_subscription_objectives(conn)
@@ -668,16 +676,26 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
 def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -> None:
     view = df.copy()
     view["fecha_ingreso"] = pd.to_datetime(view["fecha_ingreso"], errors="coerce")
-    min_date = view["fecha_ingreso"].min()
-    max_date = view["fecha_ingreso"].max()
+    available_periods = sorted(view.dropna(subset=["fecha_ingreso"])["fecha_ingreso"].dt.to_period("M").astype(str).unique(), reverse=True)
+    selected_period = available_periods[0] if available_periods else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
 
     with st.sidebar:
         with st.expander("Filtros Suscripciones", expanded=True):
-            if pd.notna(min_date) and pd.notna(max_date):
-                selected_range = st.date_input("Fecha de ingreso", value=(min_date.date(), max_date.date()), key="subscription_date_filter")
-                if len(selected_range) == 2:
-                    start, end = selected_range
-                    view = view[(view["fecha_ingreso"].dt.date >= start) & (view["fecha_ingreso"].dt.date <= end)]
+            period_years = sorted({int(period[:4]) for period in available_periods} or {int(pd.Timestamp.today().year)}, reverse=True)
+            selected_year = st.selectbox("Año ingreso", period_years, key="subscription_filter_year")
+            available_months = sorted(
+                [int(period[5:7]) for period in available_periods if int(period[:4]) == selected_year]
+                or [int(pd.Timestamp.today().month)]
+            )
+            selected_month = st.selectbox(
+                "Mes ingreso",
+                available_months,
+                index=len(available_months) - 1,
+                format_func=lambda month: month_name_es(month),
+                key="subscription_filter_month",
+            )
+            selected_period = f"{selected_year}-{int(selected_month):02d}"
+            view = view[view["fecha_ingreso"].dt.to_period("M").astype(str) == selected_period]
             brands = sorted([item for item in view["marca"].dropna().astype(str).unique() if item])
             selected_brands = st.multiselect("Marca", brands, default=brands, key="subscription_brand_filter")
             if selected_brands:
@@ -685,14 +703,19 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
 
     by_month = view.dropna(subset=["fecha_ingreso"]).assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
     objective_total = 0
-    if not objectives.empty and not by_month.empty:
-        objective_total = objectives[objectives["periodo"].isin(set(by_month["periodo"].unique()))]["objetivo"].sum()
+    if not objectives.empty:
+        objective_total = objectives[objectives["periodo"] == selected_period]["objetivo"].sum()
     compliance = (len(view) / objective_total * 100) if objective_total else 0
+
+    peugeot_count = count_brand_subscriptions(view, "Peugeot")
+    citroen_count = count_brand_subscriptions(view, "Citroen")
 
     render_kpi_grid(
         [
-            ("Suscripciones", _format_number(len(view)), "Segun fecha de ingreso", "primary"),
-            ("Objetivo", _format_number(objective_total), "Meses filtrados", "sky"),
+            ("Suscripciones", _format_number(len(view)), f"Ingreso {selected_period}", "primary"),
+            ("Peugeot", _format_number(peugeot_count), "Suscripciones filtradas", "sky"),
+            ("Citroen", _format_number(citroen_count), "Suscripciones filtradas", "indigo"),
+            ("Objetivo", _format_number(objective_total), f"Objetivo {selected_period}", "cyan"),
             ("% Cumplimiento", f"{compliance:,.1f}%", "Suscripciones / objetivo", "indigo"),
             ("Vendedores", _format_number(view["vendedor"].replace("", pd.NA).nunique()), "Activos en filtro", "cyan"),
         ]
@@ -713,7 +736,17 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
         style_chart(seller_chart, x_title="Suscripciones", y_title="", show_legend=False, height=480)
         col2.plotly_chart(seller_chart, width="stretch")
 
-    trend = by_month.groupby("periodo", as_index=False).size().rename(columns={"size": "suscripciones"})
+    full_view = df.copy()
+    full_view["fecha_ingreso"] = pd.to_datetime(full_view["fecha_ingreso"], errors="coerce")
+    if selected_brands:
+        full_view = full_view[full_view["marca"].isin(selected_brands)]
+    trend = (
+        full_view.dropna(subset=["fecha_ingreso"])
+        .assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
+        .groupby("periodo", as_index=False)
+        .size()
+        .rename(columns={"size": "suscripciones"})
+    )
     if not trend.empty:
         trend["periodo_label"] = pd.to_datetime(trend["periodo"] + "-01").dt.strftime("%b %Y")
         trend_chart = px.line(trend, x="periodo_label", y="suscripciones", markers=True, text="suscripciones", title="Tendencia por mes de fecha de ingreso")
@@ -1150,6 +1183,30 @@ def first_existing_column(df: pd.DataFrame, columns: list[str]) -> str:
         if column in df.columns:
             return column
     return columns[-1]
+
+
+def month_name_es(month: int) -> str:
+    names = {
+        1: "Enero",
+        2: "Febrero",
+        3: "Marzo",
+        4: "Abril",
+        5: "Mayo",
+        6: "Junio",
+        7: "Julio",
+        8: "Agosto",
+        9: "Septiembre",
+        10: "Octubre",
+        11: "Noviembre",
+        12: "Diciembre",
+    }
+    return names.get(int(month), str(month))
+
+
+def count_brand_subscriptions(df: pd.DataFrame, brand: str) -> int:
+    if "marca" not in df.columns:
+        return 0
+    return int(df["marca"].fillna("").astype(str).str.contains(brand, case=False, na=False).sum())
 
 
 def _format_number(value) -> str:

@@ -1,13 +1,13 @@
 # Reporting de Patentamientos
 
-Aplicacion Streamlit para importar archivos Excel de ventas, consolidar datos historicos en SQLite y visualizar KPIs de patentamientos y facturacion.
+Aplicacion Streamlit para importar archivos comerciales, consolidar datos historicos y visualizar KPIs de patentamientos, facturacion, comisiones, cuenta H y suscripciones.
 
 ## Funcionalidades
 
 - Importacion de archivos `.xlsx`, `.xls` y reportes exportados desde el sistema de gestion.
 - Importacion de archivos `.txt` separados por punto y coma, con base historica persistente.
 - Mapeo flexible de columnas para adaptar distintos formatos de Excel.
-- Persistencia local en `data/reporting.db`.
+- Persistencia local en `data/reporting.db` o persistencia productiva en PostgreSQL usando `DATABASE_URL`.
 - Actualizacion de duplicados por columnas clave, por defecto factura y matricula.
 - Si una fila duplicada llega con informacion nueva o distinta, la base consolidada se actualiza.
 - Dashboard con patentamientos, facturacion, facturas, registros y evolucion mensual.
@@ -47,4 +47,23 @@ git branch -M main
 git push -u origin main
 ```
 
-La base `data/reporting.db` queda fuera de Git por seguridad y para evitar subir datos sensibles. Si queres compartir datos entre equipos, conviene usar una base externa o un archivo SQLite controlado por backup privado.
+## PostgreSQL en Streamlit Cloud
+
+Para que las importaciones queden persistentes entre reinicios de Streamlit Cloud, usa PostgreSQL.
+
+1. Crea una base PostgreSQL en Neon, Supabase, Railway u otro proveedor.
+2. Copia la connection string en formato:
+
+```text
+postgresql://usuario:password@host:puerto/base?sslmode=require
+```
+
+3. En Streamlit Cloud, entra en `Settings` > `Secrets` y agrega:
+
+```toml
+DATABASE_URL = "postgresql://usuario:password@host:puerto/base?sslmode=require"
+```
+
+4. Reinicia la app.
+
+Si `DATABASE_URL` no existe, la app usa automaticamente SQLite local en `data/reporting.db`.

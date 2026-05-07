@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import streamlit as st
 
 from config import DATA_DIR, DB_PATH
 from transform import add_derived_columns
@@ -19,15 +21,67 @@ MARGIN_CONCEPT_COLUMNS = {
 }
 
 
-def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
+class PostgresConnection:
+    def __init__(self, url: str):
+        import psycopg2
+        import psycopg2.extras
+
+        self._conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def execute(self, sql: str, params: Iterable | None = None):
+        cursor = self._conn.cursor()
+        cursor.execute(_postgres_sql(sql), tuple(params or ()))
+        return cursor
+
+    def executemany(self, sql: str, seq_of_params: Iterable[Iterable]):
+        cursor = self._conn.cursor()
+        cursor.executemany(_postgres_sql(sql), [tuple(params) for params in seq_of_params])
+        return cursor
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def get_connection(db_path: Path = DB_PATH):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    database_url = _database_url()
+    if database_url:
+        conn = PostgresConnection(database_url)
+    else:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
     init_db(conn)
     backfill_derived_fields(conn)
     prune_txt_records_to_plan_channel(conn)
     consolidate_txt_records_by_key(conn)
     return conn
+
+
+def _database_url() -> str:
+    try:
+        secrets_url = st.secrets.get("DATABASE_URL", "")
+    except Exception:
+        secrets_url = ""
+    return secrets_url or os.getenv("DATABASE_URL", "")
+
+
+def _postgres_sql(sql: str) -> str:
+    return (
+        sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+        .replace("datetime('now')", "CURRENT_TIMESTAMP")
+        .replace("?", "%s")
+    )
+
+
+def _read_sql(conn, sql: str) -> pd.DataFrame:
+    rows = conn.execute(sql).fetchall()
+    return pd.DataFrame([dict(row) for row in rows])
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -174,10 +228,7 @@ def load_records(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def load_imports(conn: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM imports ORDER BY imported_at DESC, id DESC",
-        conn,
-    )
+    return _read_sql(conn, "SELECT * FROM imports ORDER BY imported_at DESC, id DESC")
 
 
 def load_txt_records(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -196,10 +247,7 @@ def load_txt_records(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def load_txt_imports(conn: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM txt_imports ORDER BY imported_at DESC, id DESC",
-        conn,
-    )
+    return _read_sql(conn, "SELECT * FROM txt_imports ORDER BY imported_at DESC, id DESC")
 
 
 def load_margin_records(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -229,10 +277,7 @@ def load_cuenta_h_records(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def load_cuenta_h_imports(conn: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM cuenta_h_imports ORDER BY imported_at DESC, id DESC",
-        conn,
-    )
+    return _read_sql(conn, "SELECT * FROM cuenta_h_imports ORDER BY imported_at DESC, id DESC")
 
 
 def load_subscription_records(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -249,17 +294,11 @@ def load_subscription_records(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def load_subscription_imports(conn: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM subscription_imports ORDER BY imported_at DESC, id DESC",
-        conn,
-    )
+    return _read_sql(conn, "SELECT * FROM subscription_imports ORDER BY imported_at DESC, id DESC")
 
 
 def load_subscription_objectives(conn: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM subscription_objectives ORDER BY periodo DESC",
-        conn,
-    )
+    return _read_sql(conn, "SELECT * FROM subscription_objectives ORDER BY periodo DESC")
 
 
 def save_subscription_objective(conn: sqlite3.Connection, periodo: str, objetivo: int) -> None:

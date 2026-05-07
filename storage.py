@@ -25,6 +25,7 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     init_db(conn)
     backfill_derived_fields(conn)
+    consolidate_txt_records_by_key(conn)
     return conn
 
 
@@ -485,6 +486,7 @@ def upsert_txt_records(
         """,
         (source_file, now, len(df), inserted, updated, unchanged),
     )
+    consolidated = consolidate_txt_records_by_key(conn, commit=False)
     conn.commit()
 
     return {
@@ -492,7 +494,78 @@ def upsert_txt_records(
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
+        "consolidated": consolidated,
     }
+
+
+def consolidate_txt_records_by_key(
+    conn: sqlite3.Connection,
+    key_column: str = "Pedido ABCnet",
+    commit: bool = True,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT record_key, data_json, row_hash, source_file, first_imported_at, last_imported_at
+        FROM txt_records
+        """
+    ).fetchall()
+    grouped: dict[str, list[sqlite3.Row]] = {}
+
+    for row in rows:
+        data = json.loads(row["data_json"] or "{}")
+        group_key = _normalize_key(data.get(key_column))
+        if not group_key:
+            continue
+        grouped.setdefault(group_key, []).append(row)
+
+    consolidated = 0
+    changed = False
+    for group_key, group_rows in grouped.items():
+        if len(group_rows) <= 1 and group_rows[0]["record_key"] == group_key:
+            continue
+
+        ordered_rows = sorted(
+            group_rows,
+            key=lambda row: (
+                _row_completeness(json.loads(row["data_json"] or "{}")),
+                _as_text(row["last_imported_at"]),
+            ),
+        )
+        merged_data: dict = {}
+        for row in ordered_rows:
+            merged_data = _merge_rows(merged_data, json.loads(row["data_json"] or "{}"))
+
+        row_hash = str(pd.util.hash_pandas_object(pd.Series(merged_data), index=True).sum())
+        first_imported_at = min(_as_text(row["first_imported_at"]) for row in group_rows)
+        last_imported_at = max(_as_text(row["last_imported_at"]) for row in group_rows)
+        latest_row = max(group_rows, key=lambda row: _as_text(row["last_imported_at"]))
+        source_file = _as_text(latest_row["source_file"])
+
+        conn.executemany(
+            "DELETE FROM txt_records WHERE record_key = ?",
+            [(row["record_key"],) for row in group_rows],
+        )
+        conn.execute(
+            """
+            INSERT INTO txt_records (
+                record_key, row_hash, data_json, source_file, first_imported_at, last_imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                group_key,
+                row_hash,
+                json.dumps(merged_data, ensure_ascii=False, default=str),
+                source_file,
+                first_imported_at,
+                last_imported_at,
+            ),
+        )
+        consolidated += len(group_rows) - 1
+        changed = True
+
+    if commit and changed:
+        conn.commit()
+    return consolidated
 
 
 def apply_txt_margins(conn: sqlite3.Connection, margins_df: pd.DataFrame, source_file: str) -> dict[str, int]:
@@ -795,6 +868,10 @@ def _merge_rows(existing: dict, incoming: dict) -> dict:
 
 def _clean_row(row: dict) -> dict:
     return {key: (None if _is_empty(value) else value) for key, value in row.items()}
+
+
+def _row_completeness(row: dict) -> int:
+    return sum(0 if _is_empty(value) else 1 for value in row.values())
 
 
 def _is_empty(value) -> bool:

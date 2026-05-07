@@ -159,10 +159,9 @@ def infer_cuenta_h_concept(text: str) -> str:
 
 
 def default_txt_key_columns(df: pd.DataFrame) -> list[str]:
-    preferred = ["Nro.Orden", "VIN"]
-    keys = [column for column in preferred if column in df.columns and df[column].notna().any()]
-    if keys:
-        return keys
+    for column in ["Pedido ABCnet", "Nro.Orden Produccion", "VIN", "Nro.Orden"]:
+        if column in df.columns and df[column].notna().any():
+            return [column]
     return [column for column in df.columns if df[column].notna().any()][:2]
 
 

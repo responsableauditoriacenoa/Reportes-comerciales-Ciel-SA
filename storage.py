@@ -25,6 +25,7 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     init_db(conn)
     backfill_derived_fields(conn)
+    prune_txt_records_to_plan_channel(conn)
     consolidate_txt_records_by_key(conn)
     return conn
 
@@ -423,11 +424,15 @@ def upsert_txt_records(
     key_columns: Iterable[str],
 ) -> dict[str, int]:
     now = datetime.utcnow().isoformat(timespec="seconds")
-    inserted = updated = unchanged = 0
-    key_columns = list(key_columns)
+    inserted = updated = unchanged = skipped = 0
+    key_columns = ["Pedido ABCnet"] if "Pedido ABCnet" in df.columns else list(key_columns)
 
     for _, row in df.iterrows():
         row_dict = _clean_row(row.to_dict())
+        if not _is_plan_savings_channel(row_dict):
+            skipped += 1
+            continue
+
         record_key = make_record_key(row_dict, key_columns)
         row_hash = str(pd.util.hash_pandas_object(pd.Series(row_dict), index=True).sum())
 
@@ -487,6 +492,7 @@ def upsert_txt_records(
         (source_file, now, len(df), inserted, updated, unchanged),
     )
     consolidated = consolidate_txt_records_by_key(conn, commit=False)
+    removed_non_plan = prune_txt_records_to_plan_channel(conn, commit=False)
     conn.commit()
 
     return {
@@ -494,8 +500,28 @@ def upsert_txt_records(
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
+        "skipped": skipped,
         "consolidated": consolidated,
+        "removed_non_plan": removed_non_plan,
     }
+
+
+def prune_txt_records_to_plan_channel(conn: sqlite3.Connection, commit: bool = True) -> int:
+    rows = conn.execute("SELECT record_key, data_json FROM txt_records").fetchall()
+    delete_keys = []
+
+    for row in rows:
+        data = json.loads(row["data_json"] or "{}")
+        if not _is_plan_savings_channel(data):
+            delete_keys.append((row["record_key"],))
+
+    if not delete_keys:
+        return 0
+
+    conn.executemany("DELETE FROM txt_records WHERE record_key = ?", delete_keys)
+    if commit:
+        conn.commit()
+    return len(delete_keys)
 
 
 def consolidate_txt_records_by_key(
@@ -872,6 +898,12 @@ def _clean_row(row: dict) -> dict:
 
 def _row_completeness(row: dict) -> int:
     return sum(0 if _is_empty(value) else 1 for value in row.values())
+
+
+def _is_plan_savings_channel(row: dict) -> bool:
+    channel = _as_text(row.get("Canal Vta.") or row.get("Canal Vta") or row.get("Canal Venta"))
+    normalized = channel.upper()
+    return "PLAN" in normalized and "AHORRO" in normalized
 
 
 def _is_empty(value) -> bool:

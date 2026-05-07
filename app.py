@@ -404,32 +404,38 @@ def render_txt_import(conn, existing_records: pd.DataFrame, margin_records: pd.D
 
     raw_df = read_txt_table(uploaded_file)
     normalized_df = normalize_txt_dataframe(raw_df)
+    importable_df = _filter_plan_savings_rows(normalized_df)
 
     st.subheader("Preview TXT")
-    st.caption("El archivo se convierte a tabla y se guarda sin borrar datos historicos que ya no vengan en futuras importaciones.")
-    render_dataframe(normalized_df.head(80))
+    st.caption("Solo se guardan operaciones del canal Plan de ahorro. El resto de los canales se ignora al importar.")
+    render_dataframe(importable_df.head(80))
 
     with st.sidebar:
         with st.expander("Opciones TXT", expanded=True):
-            default_keys = default_txt_key_columns(normalized_df)
+            default_keys = default_txt_key_columns(importable_df)
             key_columns = st.multiselect(
                 "Columnas para detectar duplicados",
-                options=list(normalized_df.columns),
+                options=list(importable_df.columns),
                 default=default_keys,
                 key="txt_key_columns",
             )
             import_clicked = st.button("Importar TXT y actualizar base", type="primary", width="stretch")
 
+    if importable_df.empty:
+        st.warning("No encontre operaciones de Plan de ahorro en este archivo.")
+        return
+
     if not key_columns:
-        st.error("Elegi al menos una columna clave. Para este TXT recomiendo Nro.Orden y VIN.")
+        st.error("Elegi al menos una columna clave. Para este TXT recomiendo Pedido ABCnet.")
         return
 
     if import_clicked:
-        result = upsert_txt_records(conn, normalized_df, uploaded_file.name, key_columns)
+        result = upsert_txt_records(conn, importable_df, uploaded_file.name, key_columns)
+        ignored_by_channel = len(normalized_df) - len(importable_df) + result.get("skipped", 0)
         st.success(
             "Importacion TXT completa: "
             f"{result['inserted']} nuevas, {result['updated']} actualizadas, "
-            f"{result['unchanged']} sin cambios."
+            f"{result['unchanged']} sin cambios, {ignored_by_channel} ignoradas por canal."
         )
         existing_records = load_txt_records(conn)
 
@@ -996,6 +1002,15 @@ def _count_units(df: pd.DataFrame, unit_column: str | None) -> int:
 
 def _not_empty(series: pd.Series) -> pd.Series:
     return series.notna() & (series.astype(str).str.strip() != "")
+
+
+def _filter_plan_savings_rows(df: pd.DataFrame) -> pd.DataFrame:
+    channel_columns = [column for column in ["Canal Vta.", "Canal Vta", "Canal Venta"] if column in df.columns]
+    if not channel_columns:
+        return df.iloc[0:0].copy()
+
+    channel = df[channel_columns[0]].fillna("").astype(str).str.upper()
+    return df[channel.str.contains("PLAN", na=False) & channel.str.contains("AHORRO", na=False)].copy()
 
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:

@@ -869,27 +869,40 @@ def render_txt_kpis(df: pd.DataFrame, margin_records: pd.DataFrame | None = None
 
     render_margin_kpis(df, margin_records)
 
-    if channel_column:
-        by_channel = (
-            df.assign(_unidad=df[unit_column] if unit_column else df.index.astype(str))
-            .groupby(channel_column, dropna=False, as_index=False)
-            .agg(unidades=("_unidad", lambda values: values.dropna().astype(str).str.strip().replace("", pd.NA).dropna().nunique()))
-            .sort_values("unidades", ascending=False)
-        )
-        by_channel[channel_column] = by_channel[channel_column].fillna("Sin canal").replace("", "Sin canal")
-        channel_chart = px.bar(
-            by_channel,
-            x=channel_column,
-            y="unidades",
-            title="Cantidad de unidades por canal de venta",
-            text="unidades",
-            color="unidades",
-            color_continuous_scale=["#dbeafe", "#2563eb", "#0f3f8c"],
-        )
-        channel_chart.update_traces(marker_line_color="#ffffff", marker_line_width=1.4, textposition="outside")
-        style_chart(channel_chart, x_title="Canal de venta", y_title="Unidades", show_coloraxis=False)
-        channel_chart.update_xaxes(type="category")
-        st.plotly_chart(channel_chart, width="stretch")
+    if "Fecha Aprobacion" in df.columns:
+        approved_df = df.copy()
+        approved_df["Fecha Aprobacion"] = pd.to_datetime(approved_df["Fecha Aprobacion"], errors="coerce")
+        approved_df = approved_df.dropna(subset=["Fecha Aprobacion"])
+
+        if not approved_df.empty:
+            pedido_column = "Pedido ABCnet" if "Pedido ABCnet" in approved_df.columns else unit_column
+            if pedido_column:
+                approved_df["_pedido"] = approved_df[pedido_column].fillna("").astype(str).str.strip()
+                approved_df = approved_df[approved_df["_pedido"] != ""]
+            else:
+                approved_df["_pedido"] = approved_df.index.astype(str)
+
+            monthly_approved = (
+                approved_df.assign(periodo=lambda data: data["Fecha Aprobacion"].dt.to_period("M").astype(str))
+                .groupby("periodo", as_index=False)
+                .agg(pedidos_aprobados=("_pedido", "nunique"))
+                .sort_values("periodo")
+            )
+            monthly_approved["periodo_label"] = pd.to_datetime(monthly_approved["periodo"] + "-01").dt.strftime("%b %Y")
+
+            approved_chart = px.bar(
+                monthly_approved,
+                x="periodo_label",
+                y="pedidos_aprobados",
+                title="Cantidad de pedidos aprobados por mes",
+                text="pedidos_aprobados",
+                color="pedidos_aprobados",
+                color_continuous_scale=["#dbeafe", "#2563eb", "#0f3f8c"],
+            )
+            approved_chart.update_traces(marker_line_color="#ffffff", marker_line_width=1.4, textposition="outside")
+            style_chart(approved_chart, x_title="Mes de aprobacion", y_title="Pedidos aprobados", show_coloraxis=False)
+            approved_chart.update_xaxes(type="category")
+            st.plotly_chart(approved_chart, width="stretch")
 
 
 def render_margin_kpis(df: pd.DataFrame, margin_records: pd.DataFrame | None = None) -> None:

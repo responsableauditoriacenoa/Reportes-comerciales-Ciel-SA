@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import re
 
 import pandas as pd
 import plotly.express as px
@@ -468,7 +469,7 @@ def render_margin_import(conn, margin_file) -> None:
 
 def render_txt_table(df: pd.DataFrame, margin_records: pd.DataFrame | None = None) -> None:
     search = st.text_input("Buscar en base TXT", key="txt_search")
-    view = order_txt_by_approval_date(order_txt_columns(df.copy()))
+    view = order_txt_by_approval_date(order_txt_columns(_deduplicate_txt_view(df)))
     if search:
         mask = view.astype(str).apply(lambda column: column.str.contains(search, case=False, na=False)).any(axis=1)
         view = view[mask]
@@ -1011,6 +1012,32 @@ def _filter_plan_savings_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     channel = df[channel_columns[0]].fillna("").astype(str).str.upper()
     return df[channel.str.contains("PLAN", na=False) & channel.str.contains("AHORRO", na=False)].copy()
+
+
+def _deduplicate_txt_view(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "Pedido ABCnet" not in df.columns:
+        return df.copy()
+
+    view = df.copy()
+    view["_pedido_key"] = view["Pedido ABCnet"].map(_normalize_display_key)
+    view = view[view["_pedido_key"] != ""].copy()
+    if view.empty:
+        return df.copy()
+
+    view["_completeness"] = view.apply(lambda row: row.notna().sum(), axis=1)
+    view["_last_sort"] = pd.to_datetime(view.get("last_imported_at"), errors="coerce")
+    view = view.sort_values(["_pedido_key", "_completeness", "_last_sort"], ascending=[True, True, True])
+    view = view.drop_duplicates("_pedido_key", keep="last")
+    return view.drop(columns=["_pedido_key", "_completeness", "_last_sort"], errors="ignore")
+
+
+def _normalize_display_key(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return "".join(re.findall(r"\d+", text))
 
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:

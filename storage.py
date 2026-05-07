@@ -181,6 +181,8 @@ def load_imports(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def load_txt_records(conn: sqlite3.Connection) -> pd.DataFrame:
+    prune_txt_records_to_plan_channel(conn)
+    consolidate_txt_records_by_key(conn)
     rows = conn.execute("SELECT * FROM txt_records").fetchall()
     if not rows:
         return pd.DataFrame()

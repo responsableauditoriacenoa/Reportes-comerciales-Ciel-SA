@@ -613,6 +613,7 @@ def render_cuenta_h_kpis(df: pd.DataFrame) -> None:
 
 def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
     objectives = load_subscription_objectives(conn)
+    auto_synced = False
     with st.sidebar:
         with st.expander("Google Sheets", expanded=True):
             st.caption("Sincroniza la planilla publica de suscripciones.")
@@ -639,6 +640,10 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
 
     if sync_sheet:
         existing_records = sync_subscriptions_google_sheet(conn, existing_records)
+
+    if existing_records.empty and not sync_sheet:
+        existing_records = sync_subscriptions_google_sheet(conn, existing_records, show_preview=False, auto=True)
+        auto_synced = not existing_records.empty
 
     if save_objective:
         if save_subscription_objective is None:
@@ -686,11 +691,19 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
             st.subheader("Objetivos cargados")
             render_dataframe(objectives)
         return
+    if auto_synced:
+        st.info("Sincronicé automáticamente la planilla pública porque la base de suscripciones estaba vacía.")
 
     render_subscriptions_dashboard(existing_records, objectives)
 
 
-def sync_subscriptions_google_sheet(conn, existing_records: pd.DataFrame) -> pd.DataFrame:
+def sync_subscriptions_google_sheet(
+    conn,
+    existing_records: pd.DataFrame,
+    *,
+    show_preview: bool = True,
+    auto: bool = False,
+) -> pd.DataFrame:
     if read_public_google_sheet is None:
         st.error("La lectura de Google Sheets no esta disponible en esta version de la app.")
         return existing_records
@@ -701,7 +714,11 @@ def sync_subscriptions_google_sheet(conn, existing_records: pd.DataFrame) -> pd.
     try:
         raw_df = read_public_google_sheet(SUBSCRIPTIONS_SHEET_ID, SUBSCRIPTIONS_SHEET_GID)
     except Exception as error:
-        st.error(f"No pude leer la planilla publica de Google Sheets: {error}")
+        message = f"No pude leer la planilla publica de Google Sheets: {error}"
+        if auto:
+            st.warning(message)
+        else:
+            st.error(message)
         return existing_records
 
     normalized_df = normalize_subscriptions_dataframe(raw_df)
@@ -716,13 +733,15 @@ def sync_subscriptions_google_sheet(conn, existing_records: pd.DataFrame) -> pd.
         "Google Sheets - Suscripciones",
         key_columns,
     )
-    st.success(
-        "Google Sheets sincronizado: "
-        f"{result['inserted']} nuevas, {result['updated']} actualizadas, "
-        f"{result['unchanged']} sin cambios."
-    )
-    with st.expander("Preview Google Sheets sincronizado", expanded=False):
-        render_dataframe(normalized_df.head(80))
+    if not auto:
+        st.success(
+            "Google Sheets sincronizado: "
+            f"{result['inserted']} nuevas, {result['updated']} actualizadas, "
+            f"{result['unchanged']} sin cambios."
+        )
+    if show_preview:
+        with st.expander("Preview Google Sheets sincronizado", expanded=False):
+            render_dataframe(normalized_df.head(80))
     return load_subscription_records(conn)
 
 
@@ -735,15 +754,18 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
     with st.sidebar:
         with st.expander("Filtros Suscripciones", expanded=True):
             period_years = sorted({int(period[:4]) for period in available_periods} or {int(pd.Timestamp.today().year)}, reverse=True)
-            selected_year = st.selectbox("Año ingreso", period_years, key="subscription_filter_year")
+            default_year_index = period_years.index(int(selected_period[:4])) if selected_period and int(selected_period[:4]) in period_years else 0
+            selected_year = st.selectbox("Año ingreso", period_years, index=default_year_index, key="subscription_filter_year")
             available_months = sorted(
                 [int(period[5:7]) for period in available_periods if int(period[:4]) == selected_year]
                 or [int(pd.Timestamp.today().month)]
             )
+            default_month = int(selected_period[5:7]) if selected_period and int(selected_period[:4]) == selected_year else available_months[-1]
+            default_month_index = available_months.index(default_month) if default_month in available_months else len(available_months) - 1
             selected_month = st.selectbox(
                 "Mes ingreso",
                 available_months,
-                index=len(available_months) - 1,
+                index=default_month_index,
                 format_func=lambda month: month_name_es(month),
                 key="subscription_filter_month",
             )

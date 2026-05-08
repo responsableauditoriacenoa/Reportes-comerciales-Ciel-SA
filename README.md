@@ -67,3 +67,5 @@ DATABASE_URL = "postgresql://usuario:password@host:puerto/base?sslmode=require"
 4. Reinicia la app.
 
 Si `DATABASE_URL` no existe, la app usa automaticamente SQLite local en `data/reporting.db`.
+
+Al conectar PostgreSQL por primera vez, si la base de Neon esta vacia, la app migra automaticamente el contenido incluido en `data/reporting.db`.

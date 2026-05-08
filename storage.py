@@ -21,12 +21,29 @@ MARGIN_CONCEPT_COLUMNS = {
 }
 
 
+TABLE_PRIMARY_KEYS = {
+    "records": "record_key",
+    "imports": "id",
+    "txt_records": "record_key",
+    "txt_imports": "id",
+    "margin_records": "margin_key",
+    "cuenta_h_records": "record_key",
+    "cuenta_h_imports": "id",
+    "subscription_records": "record_key",
+    "subscription_imports": "id",
+    "subscription_objectives": "periodo",
+}
+
+DATA_TABLES = ["records", "txt_records", "margin_records", "cuenta_h_records", "subscription_records"]
+
+
 class PostgresConnection:
     def __init__(self, url: str):
         import psycopg2
         import psycopg2.extras
 
         self._conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+        self.is_postgres = True
 
     def execute(self, sql: str, params: Iterable | None = None):
         cursor = self._conn.cursor()
@@ -57,6 +74,8 @@ def get_connection(db_path: Path = DB_PATH):
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
     init_db(conn)
+    if database_url:
+        seed_postgres_from_sqlite_if_empty(conn, db_path)
     backfill_derived_fields(conn)
     prune_txt_records_to_plan_channel(conn)
     consolidate_txt_records_by_key(conn)
@@ -82,6 +101,70 @@ def _postgres_sql(sql: str) -> str:
 def _read_sql(conn, sql: str) -> pd.DataFrame:
     rows = conn.execute(sql).fetchall()
     return pd.DataFrame([dict(row) for row in rows])
+
+
+def seed_postgres_from_sqlite_if_empty(conn, sqlite_path: Path = DB_PATH) -> dict[str, int]:
+    if not getattr(conn, "is_postgres", False) or not sqlite_path.exists():
+        return {}
+    if _postgres_has_business_data(conn):
+        return {}
+
+    sqlite_conn = sqlite3.connect(sqlite_path)
+    sqlite_conn.row_factory = sqlite3.Row
+    try:
+        migrated = {}
+        for table, primary_key in TABLE_PRIMARY_KEYS.items():
+            migrated[table] = _copy_sqlite_table(sqlite_conn, conn, table, primary_key)
+        conn.commit()
+        return migrated
+    finally:
+        sqlite_conn.close()
+
+
+def _postgres_has_business_data(conn) -> bool:
+    for table in DATA_TABLES:
+        count = conn.execute(f"SELECT COUNT(*) AS total FROM {table}").fetchone()["total"]
+        if int(count or 0) > 0:
+            return True
+    return False
+
+
+def _copy_sqlite_table(sqlite_conn: sqlite3.Connection, postgres_conn, table: str, primary_key: str) -> int:
+    exists = sqlite_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if not exists:
+        return 0
+
+    rows = sqlite_conn.execute(f"SELECT * FROM {table}").fetchall()
+    if not rows:
+        return 0
+
+    columns = rows[0].keys()
+    column_list = ", ".join(columns)
+    placeholders = ", ".join("?" for _ in columns)
+    update_columns = [column for column in columns if column != primary_key]
+    update_sql = ", ".join(f"{column} = EXCLUDED.{column}" for column in update_columns)
+    postgres_conn.executemany(
+        f"""
+        INSERT INTO {table} ({column_list})
+        VALUES ({placeholders})
+        ON CONFLICT ({primary_key}) DO UPDATE SET {update_sql}
+        """,
+        ([row[column] for column in columns] for row in rows),
+    )
+    if primary_key == "id":
+        postgres_conn.execute(
+            f"""
+            SELECT setval(
+                pg_get_serial_sequence('{table}', 'id'),
+                COALESCE((SELECT MAX(id) FROM {table}), 1),
+                true
+            )
+            """
+        )
+    return len(rows)
 
 
 def init_db(conn: sqlite3.Connection) -> None:

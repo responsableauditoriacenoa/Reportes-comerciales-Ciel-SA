@@ -1141,35 +1141,60 @@ def render_dataframe(df: pd.DataFrame) -> None:
 
 def money_column_config(df: pd.DataFrame) -> dict:
     config = {}
-    money_keywords = [
-        "importe",
-        "valor",
-        "debito",
-        "credito",
-        "saldo",
-        "margen",
-        "facturacion",
-        "total",
-    ]
-    excluded_columns = {
-        "f.valor",
-        "fecha valor",
-        "contrato margen",
-        "first_imported_at",
-        "last_imported_at",
-        "imported_at",
-        "last_imported_at",
-    }
     for column in df.columns:
-        normalized = str(column).lower()
-        if normalized in excluded_columns or "imported_at" in normalized:
-            continue
-        if any(keyword in normalized for keyword in money_keywords):
+        if _is_money_column(column):
             config[column] = st.column_config.NumberColumn(
                 str(column),
                 format="$ %,.2f",
             )
     return config
+
+
+def _is_money_column(column) -> bool:
+    normalized = str(column).strip().lower()
+    normalized = normalized.replace("_", " ")
+
+    excluded_terms = [
+        "fecha",
+        "grupo",
+        "orden",
+        "contrato",
+        "suscripcion",
+        "cuota",
+        "archivo",
+        "concepto",
+        "codigo",
+        "nro",
+        "numero",
+        "id",
+        "hash",
+        "imported at",
+    ]
+    if any(term in normalized for term in excluded_terms):
+        return False
+
+    exact_money_columns = {
+        "valor",
+        "importe",
+        "debito",
+        "credito",
+        "saldo",
+        "debe",
+        "haber",
+        "facturacion",
+        "importe margen",
+        "margen total",
+        "total margen",
+        "total margen concepto",
+        "total margenes",
+        "margen venta 1ra parte",
+        "margen venta 2da parte",
+        "margen cambio modelo contado",
+    }
+    if normalized in exact_money_columns:
+        return True
+
+    return normalized.startswith("importe ") or normalized.startswith("margen ")
 
 
 def render_html(html: str) -> None:

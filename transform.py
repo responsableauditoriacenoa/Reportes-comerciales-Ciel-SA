@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from io import BytesIO
 from html.parser import HTMLParser
 import re
 import unicodedata
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import pandas as pd
 
@@ -172,6 +175,14 @@ def read_subscription_file(file) -> pd.DataFrame:
     return read_txt_table(file)
 
 
+def read_public_google_sheet(sheet_id: str, gid: str | int = 0) -> pd.DataFrame:
+    query = urlencode({"format": "csv", "gid": str(gid)})
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?{query}"
+    with urlopen(url, timeout=30) as response:
+        content = response.read()
+    return pd.read_csv(BytesIO(content), dtype=object)
+
+
 def normalize_subscriptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(how="all").copy()
     df.columns = [str(column).strip() for column in df.columns]
@@ -179,8 +190,13 @@ def normalize_subscriptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     normalized_lookup = {_normalize_column_name(column): column for column in df.columns}
 
     aliases = {
-        "fecha_ingreso": ["fecha_ingreso", "fecha ingreso", "f_ingreso", "ingreso", "fecha"],
-        "marca": ["marca", "brand"],
+        "fecha_ingreso": ["fecha_ingreso", "fecha ingreso", "f_ingreso", "f. de ingreso", "ingreso", "fecha"],
+        "fecha_confirmacion_cliente": [
+            "fecha_confirmacion_cliente",
+            "fecha confirmacion cliente",
+            "fecha confirmación cliente",
+        ],
+        "marca": ["marca", "brand", "peugeot", "citroen", "citroën"],
         "vendedor": ["vendedor", "asesor", "comercial", "salesperson"],
     }
     for target, candidates in aliases.items():
@@ -195,18 +211,109 @@ def normalize_subscriptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if column not in df.columns:
             df[column] = None
 
-    df["fecha_ingreso"] = pd.to_datetime(df["fecha_ingreso"], dayfirst=True, errors="coerce").dt.date.astype("string")
-    df["marca"] = df["marca"].astype("string").str.strip().str.title()
+    df["fecha_ingreso"] = df.apply(_parse_subscription_entry_date, axis=1).astype("string")
+    df["marca"] = df["marca"].map(_normalize_subscription_brand).astype("string")
     df["vendedor"] = df["vendedor"].astype("string").str.strip().str.title()
     return df
 
 
 def default_subscription_key_columns(df: pd.DataFrame) -> list[str]:
+    preferred_groups = [
+        ["solicitud"],
+        ["solicitud_1"],
+        ["id"],
+        ["id_suscripcion"],
+        ["suscripcion"],
+        ["nro_suscripcion"],
+        ["numero_suscripcion"],
+        ["contrato"],
+        ["dni"],
+        ["documento"],
+        ["cuit"],
+        ["cuil"],
+        ["cliente", "fecha_ingreso", "marca"],
+        ["vendedor", "fecha_ingreso", "marca", "cliente"],
+    ]
+    normalized_lookup = {_normalize_column_name(column): column for column in df.columns}
+    for group in preferred_groups:
+        columns = [
+            normalized_lookup[_normalize_column_name(column)]
+            for column in group
+            if _normalize_column_name(column) in normalized_lookup
+        ]
+        if len(columns) == len(group) and all(df[column].notna().any() for column in columns):
+            return columns
+
     preferred = ["fecha_ingreso", "marca", "vendedor"]
     candidates = [column for column in preferred if column in df.columns and df[column].notna().any()]
-    if len(candidates) >= 2:
-        return candidates
+    if candidates:
+        extra_candidates = [column for column in df.columns if column not in candidates and df[column].notna().any()]
+        return (candidates + extra_candidates)[:5]
     return [column for column in df.columns if df[column].notna().any()][:3]
+
+
+def _parse_subscription_entry_date(row: pd.Series) -> str | None:
+    value = row.get("fecha_ingreso")
+    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.date().isoformat()
+
+    text = "" if _is_empty(value) else str(value).strip().lower()
+    month_lookup = {
+        "ene": 1,
+        "enero": 1,
+        "feb": 2,
+        "febrero": 2,
+        "mar": 3,
+        "marzo": 3,
+        "abr": 4,
+        "abril": 4,
+        "may": 5,
+        "mayo": 5,
+        "jun": 6,
+        "junio": 6,
+        "jul": 7,
+        "julio": 7,
+        "ago": 8,
+        "agosto": 8,
+        "sep": 9,
+        "sept": 9,
+        "septiembre": 9,
+        "oct": 10,
+        "octubre": 10,
+        "nov": 11,
+        "noviembre": 11,
+        "dic": 12,
+        "diciembre": 12,
+    }
+    match = re.search(r"(\d{1,2})\s*[-/]\s*([a-záéíóúñ]+)", text)
+    if not match:
+        return None
+
+    day = int(match.group(1))
+    month = month_lookup.get(_normalize_column_name(match.group(2)).replace("_", ""))
+    if not month:
+        return None
+
+    confirmation = pd.to_datetime(row.get("fecha_confirmacion_cliente"), dayfirst=True, errors="coerce")
+    year = int(confirmation.year) if pd.notna(confirmation) else int(pd.Timestamp.today().year)
+    if pd.notna(confirmation) and month < int(confirmation.month):
+        year += 1
+    try:
+        return pd.Timestamp(year=year, month=month, day=day).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _normalize_subscription_brand(value) -> str:
+    text = _clean_text(value)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    if "CITROEN" in text:
+        return "Citroen"
+    if "PEUGEOT" in text:
+        return "Peugeot"
+    return str(value).strip().title() if not _is_empty(value) else ""
 
 
 class _TableCellParser(HTMLParser):

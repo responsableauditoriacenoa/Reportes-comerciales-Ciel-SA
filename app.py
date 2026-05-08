@@ -19,6 +19,7 @@ normalize_txt_dataframe = tf.normalize_txt_dataframe
 read_cuenta_h_txt = getattr(tf, "read_cuenta_h_txt", lambda file: pd.DataFrame())
 read_htm_margins = tf.read_htm_margins
 read_excel = tf.read_excel
+read_public_google_sheet = getattr(tf, "read_public_google_sheet", None)
 read_txt_table = tf.read_txt_table
 read_subscription_file = getattr(tf, "read_subscription_file", read_txt_table)
 normalize_subscriptions_dataframe = getattr(tf, "normalize_subscriptions_dataframe", lambda df: df)
@@ -45,6 +46,9 @@ upsert_cuenta_h_records = getattr(db, "upsert_cuenta_h_records", None)
 upsert_records = db.upsert_records
 upsert_subscription_records = getattr(db, "upsert_subscription_records", None)
 upsert_txt_records = db.upsert_txt_records
+
+SUBSCRIPTIONS_SHEET_ID = "1A1DBfQ2ssNb53g0hJhu28Vex6gDQvSr_"
+SUBSCRIPTIONS_SHEET_GID = "810757508"
 
 
 st.set_page_config(
@@ -610,6 +614,9 @@ def render_cuenta_h_kpis(df: pd.DataFrame) -> None:
 def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
     objectives = load_subscription_objectives(conn)
     with st.sidebar:
+        with st.expander("Google Sheets", expanded=True):
+            st.caption("Sincroniza la planilla publica de suscripciones.")
+            sync_sheet = st.button("Actualizar desde Google Sheets", type="primary", width="stretch")
         with st.expander("Importacion Suscripciones", expanded=True):
             uploaded_file = st.file_uploader(
                 "Archivo Suscripciones",
@@ -629,6 +636,9 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
             )
             objective_value = st.number_input("Objetivo", min_value=0, step=1, key="subscription_objective_value")
             save_objective = st.button("Guardar objetivo", type="primary", width="stretch")
+
+    if sync_sheet:
+        existing_records = sync_subscriptions_google_sheet(conn, existing_records)
 
     if save_objective:
         if save_subscription_objective is None:
@@ -671,13 +681,49 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
 
     st.subheader("Suscripciones")
     if existing_records.empty:
-        st.info("Subi un archivo de suscripciones desde el panel lateral para crear la base consolidada.")
+        st.info("Actualiza desde Google Sheets o subi un archivo de suscripciones desde el panel lateral para crear la base consolidada.")
         if not objectives.empty:
             st.subheader("Objetivos cargados")
             render_dataframe(objectives)
         return
 
     render_subscriptions_dashboard(existing_records, objectives)
+
+
+def sync_subscriptions_google_sheet(conn, existing_records: pd.DataFrame) -> pd.DataFrame:
+    if read_public_google_sheet is None:
+        st.error("La lectura de Google Sheets no esta disponible en esta version de la app.")
+        return existing_records
+    if upsert_subscription_records is None:
+        st.error("El modulo Suscripciones todavia no esta disponible en la base. Reinicia la app y vuelve a intentar.")
+        return existing_records
+
+    try:
+        raw_df = read_public_google_sheet(SUBSCRIPTIONS_SHEET_ID, SUBSCRIPTIONS_SHEET_GID)
+    except Exception as error:
+        st.error(f"No pude leer la planilla publica de Google Sheets: {error}")
+        return existing_records
+
+    normalized_df = normalize_subscriptions_dataframe(raw_df)
+    if normalized_df.empty:
+        st.warning("La planilla de Google Sheets no trajo filas para sincronizar.")
+        return existing_records
+
+    key_columns = default_subscription_key_columns(normalized_df)
+    result = upsert_subscription_records(
+        conn,
+        normalized_df,
+        "Google Sheets - Suscripciones",
+        key_columns,
+    )
+    st.success(
+        "Google Sheets sincronizado: "
+        f"{result['inserted']} nuevas, {result['updated']} actualizadas, "
+        f"{result['unchanged']} sin cambios."
+    )
+    with st.expander("Preview Google Sheets sincronizado", expanded=False):
+        render_dataframe(normalized_df.head(80))
+    return load_subscription_records(conn)
 
 
 def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -> None:

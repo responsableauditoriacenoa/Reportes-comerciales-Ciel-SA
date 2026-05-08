@@ -406,10 +406,14 @@ def upsert_subscription_records(
     now = datetime.utcnow().isoformat(timespec="seconds")
     inserted = updated = unchanged = 0
     key_columns = list(key_columns)
+    rows_by_key: dict[str, dict] = {}
 
     for _, row in df.iterrows():
         row_dict = _clean_row(row.to_dict())
         record_key = make_record_key(row_dict, key_columns)
+        rows_by_key[record_key] = _merge_rows(rows_by_key.get(record_key, {}), row_dict)
+
+    for record_key, row_dict in rows_by_key.items():
         row_hash = str(pd.util.hash_pandas_object(pd.Series(row_dict), index=True).sum())
         existing = conn.execute(
             "SELECT data_json, row_hash FROM subscription_records WHERE record_key = ?",
@@ -417,14 +421,7 @@ def upsert_subscription_records(
         ).fetchone()
 
         if existing is None:
-            conn.execute(
-                """
-                INSERT INTO subscription_records (
-                    record_key, row_hash, data_json, source_file, first_imported_at, last_imported_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (record_key, row_hash, json.dumps(row_dict, ensure_ascii=False, default=str), source_file, now, now),
-            )
+            _upsert_subscription_row(conn, record_key, row_dict, row_hash, source_file, now, now)
             inserted += 1
             continue
 
@@ -460,6 +457,37 @@ def upsert_subscription_records(
         "updated": updated,
         "unchanged": unchanged,
     }
+
+
+def _upsert_subscription_row(
+    conn: sqlite3.Connection,
+    record_key: str,
+    row_dict: dict,
+    row_hash: str,
+    source_file: str,
+    first_imported_at: str,
+    last_imported_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO subscription_records (
+            record_key, row_hash, data_json, source_file, first_imported_at, last_imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(record_key) DO UPDATE SET
+            row_hash = excluded.row_hash,
+            data_json = excluded.data_json,
+            source_file = excluded.source_file,
+            last_imported_at = excluded.last_imported_at
+        """,
+        (
+            record_key,
+            row_hash,
+            json.dumps(row_dict, ensure_ascii=False, default=str),
+            source_file,
+            first_imported_at,
+            last_imported_at,
+        ),
+    )
 
 
 def upsert_cuenta_h_records(

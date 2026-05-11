@@ -254,7 +254,8 @@ def default_subscription_key_columns(df: pd.DataFrame) -> list[str]:
 
 def _parse_subscription_entry_date(row: pd.Series) -> str | None:
     value = row.get("fecha_ingreso")
-    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    confirmation = _parse_any_subscription_date(row.get("fecha_confirmacion_cliente"))
+    parsed = _parse_any_subscription_date(value)
     if pd.notna(parsed):
         return parsed.date().isoformat()
 
@@ -287,22 +288,46 @@ def _parse_subscription_entry_date(row: pd.Series) -> str | None:
         "diciembre": 12,
     }
     match = re.search(r"(\d{1,2})\s*[-/]\s*([a-záéíóúñ]+)", text)
-    if not match:
-        return None
+    if match:
+        day = int(match.group(1))
+        month = month_lookup.get(_normalize_column_name(match.group(2)).replace("_", ""))
+        if month:
+            year = int(confirmation.year) if pd.notna(confirmation) else int(pd.Timestamp.today().year)
+            if pd.notna(confirmation) and month < int(confirmation.month):
+                year += 1
+            try:
+                return pd.Timestamp(year=year, month=month, day=day).date().isoformat()
+            except ValueError:
+                pass
 
-    day = int(match.group(1))
-    month = month_lookup.get(_normalize_column_name(match.group(2)).replace("_", ""))
-    if not month:
-        return None
+    if pd.notna(confirmation):
+        return confirmation.date().isoformat()
+    return None
 
-    confirmation = pd.to_datetime(row.get("fecha_confirmacion_cliente"), dayfirst=True, errors="coerce")
-    year = int(confirmation.year) if pd.notna(confirmation) else int(pd.Timestamp.today().year)
-    if pd.notna(confirmation) and month < int(confirmation.month):
-        year += 1
-    try:
-        return pd.Timestamp(year=year, month=month, day=day).date().isoformat()
-    except ValueError:
-        return None
+
+def _parse_any_subscription_date(value):
+    if _is_empty(value):
+        return pd.NaT
+
+    text = str(value).strip()
+    parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+    if pd.notna(parsed):
+        return parsed
+
+    cleaned = re.sub(r"(?<=/)(\d{5})(?=$)", lambda match: match.group(1)[-4:], text)
+    cleaned = re.sub(r"(?<=-)(\d{5})(?=$)", lambda match: match.group(1)[-4:], cleaned)
+    if cleaned != text:
+        parsed = pd.to_datetime(cleaned, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            return parsed
+
+    compact = re.sub(r"[^\d/.-]", "", text)
+    if compact and compact != text:
+        parsed = pd.to_datetime(compact, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            return parsed
+
+    return pd.NaT
 
 
 def _normalize_subscription_brand(value) -> str:

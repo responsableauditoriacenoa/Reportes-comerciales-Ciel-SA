@@ -749,7 +749,9 @@ def sync_subscriptions_google_sheet(
 def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -> None:
     view = df.copy()
     view["fecha_ingreso"] = pd.to_datetime(view["fecha_ingreso"], errors="coerce")
-    available_periods = sorted(view.dropna(subset=["fecha_ingreso"])["fecha_ingreso"].dt.to_period("M").astype(str).unique(), reverse=True)
+    available_periods = valid_month_periods(
+        view.dropna(subset=["fecha_ingreso"])["fecha_ingreso"].dt.to_period("M").astype(str).unique()
+    )
     selected_period = available_periods[0] if available_periods else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
 
     with st.sidebar:
@@ -1099,6 +1101,15 @@ def _filter_plan_savings_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 def hide_technical_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=[column for column in df.columns if str(column).startswith("__")], errors="ignore")
+
+
+def valid_month_periods(values) -> list[str]:
+    periods = []
+    for value in values:
+        text = str(value)
+        if re.fullmatch(r"\d{4}-\d{2}", text):
+            periods.append(text)
+    return sorted(set(periods), reverse=True)
 
 
 def _deduplicate_txt_view(df: pd.DataFrame) -> pd.DataFrame:

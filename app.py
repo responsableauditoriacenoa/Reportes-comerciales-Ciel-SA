@@ -614,6 +614,10 @@ def render_cuenta_h_kpis(df: pd.DataFrame) -> None:
 def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
     objectives = load_subscription_objectives(conn)
     auto_synced = False
+    live_records = load_live_subscriptions_sheet()
+    if not live_records.empty:
+        existing_records = live_records
+
     with st.sidebar:
         with st.expander("Google Sheets", expanded=True):
             st.caption("Sincroniza la planilla publica de suscripciones.")
@@ -639,6 +643,7 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
             save_objective = st.button("Guardar objetivo", type="primary", width="stretch")
 
     if sync_sheet:
+        load_live_subscriptions_sheet.clear()
         existing_records = sync_subscriptions_google_sheet(conn, existing_records)
 
     if existing_records.empty and not sync_sheet:
@@ -693,8 +698,21 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
         return
     if auto_synced:
         st.info("Sincronicé automáticamente la planilla pública porque la base de suscripciones estaba vacía.")
+    elif not live_records.empty:
+        st.caption("Datos leídos en vivo desde Google Sheets. El botón del panel lateral fuerza una actualización y guarda una copia en la base.")
 
     render_subscriptions_dashboard(existing_records, objectives)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_live_subscriptions_sheet() -> pd.DataFrame:
+    if read_public_google_sheet is None:
+        return pd.DataFrame()
+    try:
+        raw_df = read_public_google_sheet(SUBSCRIPTIONS_SHEET_ID, SUBSCRIPTIONS_SHEET_GID)
+    except Exception:
+        return pd.DataFrame()
+    return normalize_subscriptions_dataframe(raw_df)
 
 
 def sync_subscriptions_google_sheet(

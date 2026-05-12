@@ -402,11 +402,15 @@ def upsert_subscription_records(
     df: pd.DataFrame,
     source_file: str,
     key_columns: Iterable[str],
+    replace_source: bool = False,
 ) -> dict[str, int]:
     now = datetime.utcnow().isoformat(timespec="seconds")
     inserted = updated = unchanged = 0
     key_columns = list(key_columns)
     rows_by_key: dict[str, dict] = {}
+
+    if replace_source:
+        conn.execute("DELETE FROM subscription_records WHERE source_file = ?", (source_file,))
 
     for _, row in df.iterrows():
         row_dict = _clean_row(row.to_dict())

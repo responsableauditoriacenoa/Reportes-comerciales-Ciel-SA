@@ -732,6 +732,7 @@ def sync_subscriptions_google_sheet(
         normalized_df,
         "Google Sheets - Suscripciones",
         key_columns,
+        replace_source=True,
     )
     if not auto:
         st.success(
@@ -831,10 +832,11 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
         st.plotly_chart(trend_chart, width="stretch")
 
     st.subheader("Base suscripciones consolidada")
-    render_dataframe(view)
+    display_view = hide_technical_columns(view)
+    render_dataframe(display_view)
     c1, c2 = st.columns(2)
-    c1.download_button("Descargar suscripciones CSV", view.to_csv(index=False).encode("utf-8-sig"), "suscripciones.csv", "text/csv", width="stretch")
-    c2.download_button("Descargar suscripciones Excel", to_excel_bytes(view, "Suscripciones"), "suscripciones.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    c1.download_button("Descargar suscripciones CSV", display_view.to_csv(index=False).encode("utf-8-sig"), "suscripciones.csv", "text/csv", width="stretch")
+    c2.download_button("Descargar suscripciones Excel", to_excel_bytes(display_view, "Suscripciones"), "suscripciones.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
 
 
 def order_cuenta_h_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1093,6 +1095,10 @@ def _filter_plan_savings_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     channel = df[channel_columns[0]].fillna("").astype(str).str.upper()
     return df[channel.str.contains("PLAN", na=False) & channel.str.contains("AHORRO", na=False)].copy()
+
+
+def hide_technical_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop(columns=[column for column in df.columns if str(column).startswith("__")], errors="ignore")
 
 
 def _deduplicate_txt_view(df: pd.DataFrame) -> pd.DataFrame:

@@ -180,7 +180,9 @@ def read_public_google_sheet(sheet_id: str, gid: str | int = 0) -> pd.DataFrame:
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?{query}"
     with urlopen(url, timeout=30) as response:
         content = response.read()
-    return pd.read_csv(BytesIO(content), dtype=object)
+    df = pd.read_csv(BytesIO(content), dtype=object)
+    df.insert(0, "__sheet_row", range(2, len(df) + 2))
+    return df
 
 
 def normalize_subscriptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -219,6 +221,7 @@ def normalize_subscriptions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def default_subscription_key_columns(df: pd.DataFrame) -> list[str]:
     preferred_groups = [
+        ["__sheet_row"],
         ["solicitud"],
         ["solicitud_1"],
         ["id"],

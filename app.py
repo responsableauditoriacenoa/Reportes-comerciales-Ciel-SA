@@ -660,7 +660,7 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
             st.error("El modulo de objetivos todavia no esta disponible en la base. Reinicia la app y vuelve a intentar.")
         else:
             periodo = f"{objective_year}-{int(objective_month):02d}"
-            save_subscription_objective(conn, periodo, int(objective_value), objective_brand)
+            save_subscription_objective_safe(conn, periodo, int(objective_value), objective_brand)
             st.success(f"Objetivo {objective_brand} guardado para {periodo}: {int(objective_value):,.0f}")
             objectives = load_subscription_objectives(conn)
 
@@ -718,6 +718,13 @@ def load_live_subscriptions_sheet() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     return normalize_subscriptions_dataframe(raw_df)
+
+
+def save_subscription_objective_safe(conn, periodo: str, objetivo: int, marca: str) -> None:
+    try:
+        save_subscription_objective(conn, periodo, objetivo, marca)
+    except TypeError:
+        save_subscription_objective(conn, periodo, objetivo)
 
 
 def sync_subscriptions_google_sheet(

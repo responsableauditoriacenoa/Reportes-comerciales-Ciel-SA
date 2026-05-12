@@ -32,6 +32,7 @@ TABLE_PRIMARY_KEYS = {
     "subscription_records": "record_key",
     "subscription_imports": "id",
     "subscription_objectives": "periodo",
+    "subscription_brand_objectives": "objective_key",
 }
 
 DATA_TABLES = ["records", "txt_records", "margin_records", "cuenta_h_records", "subscription_records"]
@@ -294,6 +295,17 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_brand_objectives (
+            objective_key TEXT PRIMARY KEY,
+            periodo TEXT NOT NULL,
+            marca TEXT NOT NULL,
+            objetivo INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -381,18 +393,34 @@ def load_subscription_imports(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def load_subscription_objectives(conn: sqlite3.Connection) -> pd.DataFrame:
-    return _read_sql(conn, "SELECT * FROM subscription_objectives ORDER BY periodo DESC")
+    brand_objectives = _read_sql(conn, "SELECT periodo, marca, objetivo, updated_at FROM subscription_brand_objectives ORDER BY periodo DESC, marca")
+    legacy_objectives = _read_sql(conn, "SELECT periodo, 'Total' AS marca, objetivo, updated_at FROM subscription_objectives ORDER BY periodo DESC")
+    if brand_objectives.empty:
+        return legacy_objectives
+    if legacy_objectives.empty:
+        return brand_objectives
+    existing_keys = set(zip(brand_objectives["periodo"].astype(str), brand_objectives["marca"].astype(str)))
+    legacy_objectives = legacy_objectives[
+        ~legacy_objectives.apply(lambda row: (str(row["periodo"]), str(row["marca"])) in existing_keys, axis=1)
+    ]
+    return pd.concat([brand_objectives, legacy_objectives], ignore_index=True)
 
 
-def save_subscription_objective(conn: sqlite3.Connection, periodo: str, objetivo: int) -> None:
+def save_subscription_objective(conn: sqlite3.Connection, periodo: str, objetivo: int, marca: str = "Total") -> None:
     now = datetime.utcnow().isoformat(timespec="seconds")
+    marca = _as_text(marca) or "Total"
+    objective_key = f"{periodo}|{marca.upper()}"
     conn.execute(
         """
-        INSERT INTO subscription_objectives (periodo, objetivo, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(periodo) DO UPDATE SET objetivo = excluded.objetivo, updated_at = excluded.updated_at
+        INSERT INTO subscription_brand_objectives (objective_key, periodo, marca, objetivo, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(objective_key) DO UPDATE SET
+            periodo = excluded.periodo,
+            marca = excluded.marca,
+            objetivo = excluded.objetivo,
+            updated_at = excluded.updated_at
         """,
-        (periodo, int(objetivo), now),
+        (objective_key, periodo, marca, int(objetivo), now),
     )
     conn.commit()
 

@@ -639,6 +639,11 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
                 format_func=lambda month: month_name_es(month),
                 key="subscription_objective_month",
             )
+            objective_brand = st.selectbox(
+                "Marca objetivo",
+                ["Peugeot", "Citroen", "Total"],
+                key="subscription_objective_brand",
+            )
             objective_value = st.number_input("Objetivo", min_value=0, step=1, key="subscription_objective_value")
             save_objective = st.button("Guardar objetivo", type="primary", width="stretch")
 
@@ -655,8 +660,8 @@ def render_subscriptions(conn, existing_records: pd.DataFrame) -> None:
             st.error("El modulo de objetivos todavia no esta disponible en la base. Reinicia la app y vuelve a intentar.")
         else:
             periodo = f"{objective_year}-{int(objective_month):02d}"
-            save_subscription_objective(conn, periodo, int(objective_value))
-            st.success(f"Objetivo guardado para {periodo}: {int(objective_value):,.0f}")
+            save_subscription_objective(conn, periodo, int(objective_value), objective_brand)
+            st.success(f"Objetivo {objective_brand} guardado para {periodo}: {int(objective_value):,.0f}")
             objectives = load_subscription_objectives(conn)
 
     if uploaded_file is not None:
@@ -798,19 +803,21 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
                 view = view[view["marca"].isin(selected_brands)]
 
     by_month = view.dropna(subset=["fecha_ingreso"]).assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
-    objective_total = 0
-    if not objectives.empty:
-        objective_total = objectives[objectives["periodo"] == selected_period]["objetivo"].sum()
+    objective_total = subscription_objective_total(objectives, selected_period, selected_brands)
     compliance = (len(view) / objective_total * 100) if objective_total else 0
 
     peugeot_count = count_brand_subscriptions(view, "Peugeot")
     citroen_count = count_brand_subscriptions(view, "Citroen")
+    peugeot_objective = subscription_objective_total(objectives, selected_period, ["Peugeot"])
+    citroen_objective = subscription_objective_total(objectives, selected_period, ["Citroen"])
+    peugeot_compliance = (peugeot_count / peugeot_objective * 100) if peugeot_objective else 0
+    citroen_compliance = (citroen_count / citroen_objective * 100) if citroen_objective else 0
 
     render_kpi_grid(
         [
             ("Suscripciones", _format_number(len(view)), f"Ingreso {selected_period}", "primary"),
-            ("Peugeot", _format_number(peugeot_count), "Suscripciones filtradas", "sky"),
-            ("Citroen", _format_number(citroen_count), "Suscripciones filtradas", "indigo"),
+            ("Peugeot", _format_number(peugeot_count), f"Obj. {_format_number(peugeot_objective)} | {peugeot_compliance:,.1f}%", "sky"),
+            ("Citroen", _format_number(citroen_count), f"Obj. {_format_number(citroen_objective)} | {citroen_compliance:,.1f}%", "indigo"),
             ("Objetivo", _format_number(objective_total), f"Objetivo {selected_period}", "cyan"),
             ("% Cumplimiento", f"{compliance:,.1f}%", "Suscripciones / objetivo", "indigo"),
             ("Vendedores", _format_number(view["vendedor"].replace("", pd.NA).nunique()), "Activos en filtro", "cyan"),
@@ -839,13 +846,22 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
     trend = (
         full_view.dropna(subset=["fecha_ingreso"])
         .assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
-        .groupby("periodo", as_index=False)
+        .groupby(["periodo", "marca"], as_index=False)
         .size()
         .rename(columns={"size": "suscripciones"})
     )
     if not trend.empty:
         trend["periodo_label"] = pd.to_datetime(trend["periodo"] + "-01").dt.strftime("%b %Y")
-        trend_chart = px.line(trend, x="periodo_label", y="suscripciones", markers=True, text="suscripciones", title="Tendencia por mes de fecha de ingreso")
+        trend_chart = px.line(
+            trend,
+            x="periodo_label",
+            y="suscripciones",
+            color="marca",
+            markers=True,
+            text="suscripciones",
+            title="Tendencia por mes de fecha de ingreso por marca",
+            color_discrete_map={"Peugeot": "#2563eb", "Citroen": "#0ea5e9"},
+        )
         trend_chart.update_traces(line_width=4, marker_size=10, textposition="top center")
         style_chart(trend_chart, x_title="Mes de ingreso", y_title="Suscripciones")
         trend_chart.update_xaxes(type="category")
@@ -1119,6 +1135,27 @@ def _filter_plan_savings_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 def hide_technical_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=[column for column in df.columns if str(column).startswith("__")], errors="ignore")
+
+
+def subscription_objective_total(objectives: pd.DataFrame, periodo: str, brands: list[str]) -> int:
+    if objectives.empty or "periodo" not in objectives.columns or "objetivo" not in objectives.columns:
+        return 0
+
+    period_objectives = objectives[objectives["periodo"].astype(str) == str(periodo)].copy()
+    if period_objectives.empty:
+        return 0
+
+    if "marca" not in period_objectives.columns:
+        return int(pd.to_numeric(period_objectives["objetivo"], errors="coerce").fillna(0).sum())
+
+    period_objectives["marca_norm"] = period_objectives["marca"].fillna("Total").astype(str).str.lower()
+    brand_keys = {brand.lower() for brand in brands if str(brand).strip()}
+    brand_rows = period_objectives[period_objectives["marca_norm"].isin(brand_keys)]
+    if not brand_rows.empty:
+        return int(pd.to_numeric(brand_rows["objetivo"], errors="coerce").fillna(0).sum())
+
+    total_rows = period_objectives[period_objectives["marca_norm"].isin({"total", "todas", "general"})]
+    return int(pd.to_numeric(total_rows["objetivo"], errors="coerce").fillna(0).sum())
 
 
 def valid_month_periods(values) -> list[str]:

@@ -22,6 +22,7 @@ TABLES = {
     "subscription_records": "record_key",
     "subscription_imports": "id",
     "subscription_objectives": "periodo",
+    "subscription_brand_objectives": "objective_key",
 }
 
 

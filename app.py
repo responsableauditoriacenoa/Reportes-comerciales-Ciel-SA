@@ -779,6 +779,7 @@ def sync_subscriptions_google_sheet(
 def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -> None:
     view = df.copy()
     view["fecha_ingreso"] = pd.to_datetime(view["fecha_ingreso"], errors="coerce")
+    view = filter_reasonable_subscription_dates(view)
     available_periods = valid_month_periods(
         view.dropna(subset=["fecha_ingreso"])["fecha_ingreso"].dt.to_period("M").astype(str).unique()
     )
@@ -848,31 +849,38 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
 
     full_view = df.copy()
     full_view["fecha_ingreso"] = pd.to_datetime(full_view["fecha_ingreso"], errors="coerce")
+    full_view = filter_reasonable_subscription_dates(full_view)
     if selected_brands:
         full_view = full_view[full_view["marca"].isin(selected_brands)]
-    trend = (
+    trend_base = (
         full_view.dropna(subset=["fecha_ingreso"])
         .assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
-        .groupby(["periodo", "marca"], as_index=False)
+    )
+    trend_periods = valid_month_periods(trend_base["periodo"].unique()) if not trend_base.empty else []
+    trend_base = trend_base[trend_base["periodo"].isin(trend_periods)] if trend_periods else trend_base
+    trend = (
+        trend_base.groupby(["periodo", "marca"], as_index=False)
         .size()
         .rename(columns={"size": "suscripciones"})
     )
     if not trend.empty:
         trend = trend.sort_values(["periodo", "marca"])
-        trend["periodo_fecha"] = pd.to_datetime(trend["periodo"] + "-01")
+        trend["periodo_label"] = pd.to_datetime(trend["periodo"] + "-01").dt.strftime("%b %Y")
+        category_order = [pd.to_datetime(period + "-01").strftime("%b %Y") for period in sorted(trend_periods)]
         trend_chart = px.line(
             trend,
-            x="periodo_fecha",
+            x="periodo_label",
             y="suscripciones",
             color="marca",
             markers=True,
             text="suscripciones",
             title="Tendencia por mes de fecha de ingreso por marca",
             color_discrete_map={"Peugeot": "#2563eb", "Citroen": "#0ea5e9"},
+            category_orders={"periodo_label": category_order},
         )
         trend_chart.update_traces(line_width=4, marker_size=10, textposition="top center")
         style_chart(trend_chart, x_title="Mes de ingreso", y_title="Suscripciones")
-        trend_chart.update_xaxes(tickformat="%b %Y")
+        trend_chart.update_xaxes(type="category", categoryorder="array", categoryarray=category_order)
         st.plotly_chart(trend_chart, width="stretch")
 
     st.subheader("Base suscripciones consolidada")
@@ -1166,11 +1174,24 @@ def subscription_objective_total(objectives: pd.DataFrame, periodo: str, brands:
     return int(pd.to_numeric(total_rows["objetivo"], errors="coerce").fillna(0).sum())
 
 
+def filter_reasonable_subscription_dates(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "fecha_ingreso" not in df.columns:
+        return df
+    current_year = int(pd.Timestamp.today().year)
+    years = df["fecha_ingreso"].dt.year
+    return df[years.between(2024, current_year + 1, inclusive="both")].copy()
+
+
 def valid_month_periods(values) -> list[str]:
     periods = []
+    current_year = int(pd.Timestamp.today().year)
     for value in values:
         text = str(value)
-        if re.fullmatch(r"\d{4}-\d{2}", text):
+        if not re.fullmatch(r"\d{4}-\d{2}", text):
+            continue
+        year = int(text[:4])
+        month = int(text[5:7])
+        if 2024 <= year <= current_year + 1 and 1 <= month <= 12:
             periods.append(text)
     return sorted(set(periods), reverse=True)
 

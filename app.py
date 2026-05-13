@@ -858,10 +858,11 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
         .rename(columns={"size": "suscripciones"})
     )
     if not trend.empty:
-        trend["periodo_label"] = pd.to_datetime(trend["periodo"] + "-01").dt.strftime("%b %Y")
+        trend = trend.sort_values(["periodo", "marca"])
+        trend["periodo_fecha"] = pd.to_datetime(trend["periodo"] + "-01")
         trend_chart = px.line(
             trend,
-            x="periodo_label",
+            x="periodo_fecha",
             y="suscripciones",
             color="marca",
             markers=True,
@@ -871,7 +872,7 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
         )
         trend_chart.update_traces(line_width=4, marker_size=10, textposition="top center")
         style_chart(trend_chart, x_title="Mes de ingreso", y_title="Suscripciones")
-        trend_chart.update_xaxes(type="category")
+        trend_chart.update_xaxes(tickformat="%b %Y")
         st.plotly_chart(trend_chart, width="stretch")
 
     st.subheader("Base suscripciones consolidada")

@@ -260,6 +260,14 @@ def _parse_subscription_entry_date(row: pd.Series) -> str | None:
     confirmation = _parse_any_subscription_date(row.get("fecha_confirmacion_cliente"))
     parsed = _parse_any_subscription_date(value)
     if pd.notna(parsed):
+        current_year = int(pd.Timestamp.today().year)
+        parsed_year_ok = 2024 <= int(parsed.year) <= current_year + 1
+        confirmation_year_ok = pd.notna(confirmation) and 2024 <= int(confirmation.year) <= current_year + 1
+        if not parsed_year_ok and confirmation_year_ok:
+            try:
+                parsed = pd.Timestamp(year=int(confirmation.year), month=int(parsed.month), day=int(parsed.day))
+            except ValueError:
+                parsed = confirmation
         return parsed.date().isoformat()
 
     text = "" if _is_empty(value) else str(value).strip().lower()

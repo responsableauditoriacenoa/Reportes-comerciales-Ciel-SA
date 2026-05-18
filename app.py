@@ -783,16 +783,18 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
     available_periods = valid_month_periods(
         view.dropna(subset=["fecha_ingreso"])["fecha_ingreso"].dt.to_period("M").astype(str).unique()
     )
-    selected_period = available_periods[0] if available_periods else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+    current_period = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+    selected_period = current_period
 
     with st.sidebar:
         with st.expander("Filtros Suscripciones", expanded=True):
-            period_years = sorted({int(period[:4]) for period in available_periods} or {int(pd.Timestamp.today().year)}, reverse=True)
+            period_years = sorted(({int(period[:4]) for period in available_periods} | {int(current_period[:4])}), reverse=True)
             default_year_index = period_years.index(int(selected_period[:4])) if selected_period and int(selected_period[:4]) in period_years else 0
             selected_year = st.selectbox("Año ingreso", period_years, index=default_year_index, key="subscription_filter_year")
             available_months = sorted(
-                [int(period[5:7]) for period in available_periods if int(period[:4]) == selected_year]
-                or [int(pd.Timestamp.today().month)]
+                set([int(period[5:7]) for period in available_periods if int(period[:4]) == selected_year])
+                | ({int(current_period[5:7])} if selected_year == int(current_period[:4]) else set())
+                or {int(pd.Timestamp.today().month)}
             )
             default_month = int(selected_period[5:7]) if selected_period and int(selected_period[:4]) == selected_year else available_months[-1]
             default_month_index = available_months.index(default_month) if default_month in available_months else len(available_months) - 1
@@ -805,8 +807,8 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
             )
             selected_period = f"{selected_year}-{int(selected_month):02d}"
             view = view[view["fecha_ingreso"].dt.to_period("M").astype(str) == selected_period]
-            brands = sorted([item for item in view["marca"].dropna().astype(str).unique() if item])
-            selected_brands = st.multiselect("Marca", brands, default=brands, key="subscription_brand_filter")
+            brands = sorted([item for item in df.get("marca", pd.Series(dtype=object)).dropna().astype(str).unique() if item])
+            selected_brands = st.multiselect("Marca", brands, default=[], placeholder="Todas las marcas", key="subscription_brand_filter")
             if selected_brands:
                 view = view[view["marca"].isin(selected_brands)]
 

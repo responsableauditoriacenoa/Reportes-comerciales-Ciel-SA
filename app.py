@@ -773,7 +773,7 @@ def sync_subscriptions_google_sheet(
     if show_preview:
         with st.expander("Preview Google Sheets sincronizado", expanded=False):
             render_dataframe(normalized_df.head(80))
-    return load_subscription_records(conn)
+    return normalized_df
 
 
 def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -> None:

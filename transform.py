@@ -257,18 +257,11 @@ def default_subscription_key_columns(df: pd.DataFrame) -> list[str]:
 
 def _parse_subscription_entry_date(row: pd.Series) -> str | None:
     value = row.get("fecha_ingreso")
-    confirmation = _parse_any_subscription_date(row.get("fecha_confirmacion_cliente"))
     parsed = _parse_any_subscription_date(value)
     if pd.notna(parsed):
         current_year = int(pd.Timestamp.today().year)
         parsed_year_ok = 2024 <= int(parsed.year) <= current_year + 1
-        confirmation_year_ok = pd.notna(confirmation) and 2024 <= int(confirmation.year) <= current_year + 1
-        if not parsed_year_ok and confirmation_year_ok:
-            try:
-                parsed = pd.Timestamp(year=int(confirmation.year), month=int(parsed.month), day=int(parsed.day))
-            except ValueError:
-                parsed = confirmation
-        elif not parsed_year_ok:
+        if not parsed_year_ok:
             return None
         return parsed.date().isoformat()
 
@@ -305,16 +298,12 @@ def _parse_subscription_entry_date(row: pd.Series) -> str | None:
         day = int(match.group(1))
         month = month_lookup.get(_normalize_column_name(match.group(2)).replace("_", ""))
         if month:
-            year = int(confirmation.year) if pd.notna(confirmation) else int(pd.Timestamp.today().year)
-            if pd.notna(confirmation) and month < int(confirmation.month):
-                year += 1
+            year = int(pd.Timestamp.today().year)
             try:
                 return pd.Timestamp(year=year, month=month, day=day).date().isoformat()
             except ValueError:
                 pass
 
-    if pd.notna(confirmation) and 2024 <= int(confirmation.year) <= int(pd.Timestamp.today().year) + 1:
-        return confirmation.date().isoformat()
     return None
 
 

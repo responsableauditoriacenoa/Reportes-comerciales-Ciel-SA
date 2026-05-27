@@ -88,7 +88,7 @@ def main() -> None:
         "<div class='page-hero'>"
         "<div>"
         "<p class='eyebrow'>Dashboard comercial</p>"
-        "<h1>Reporting de Patentamientos y Facturacion</h1>"
+        "<h1>Reportes Comerciales Ciel SA</h1>"
         "<p class='hero-copy'>Seguimiento consolidado por fecha de matriculacion, marca y tipo de venta.</p>"
         "</div>"
         "</div>"
@@ -813,23 +813,24 @@ def render_subscriptions_dashboard(df: pd.DataFrame, objectives: pd.DataFrame) -
                 view = view[view["marca"].isin(selected_brands)]
 
     by_month = view.dropna(subset=["fecha_ingreso"]).assign(periodo=lambda data: data["fecha_ingreso"].dt.to_period("M").astype(str))
-    objective_total = subscription_objective_total(objectives, selected_period, selected_brands)
-    compliance = (len(view) / objective_total * 100) if objective_total else 0
-
     peugeot_count = count_brand_subscriptions(view, "Peugeot")
     citroen_count = count_brand_subscriptions(view, "Citroen")
     peugeot_objective = subscription_objective_total(objectives, selected_period, ["Peugeot"])
     citroen_objective = subscription_objective_total(objectives, selected_period, ["Citroen"])
     peugeot_compliance = (peugeot_count / peugeot_objective * 100) if peugeot_objective else 0
     citroen_compliance = (citroen_count / citroen_objective * 100) if citroen_objective else 0
+    peugeot_confirmation_count = count_brand_by_confirmation_month(df, selected_period, "Peugeot")
+    citroen_confirmation_count = count_brand_by_confirmation_month(df, selected_period, "Citroen")
+    peugeot_confirmation_compliance = (peugeot_confirmation_count / peugeot_objective * 100) if peugeot_objective else 0
+    citroen_confirmation_compliance = (citroen_confirmation_count / citroen_objective * 100) if citroen_objective else 0
 
     render_kpi_grid(
         [
             ("Suscripciones", _format_number(len(view)), f"Ingreso {selected_period}", "primary"),
             ("Peugeot", _format_number(peugeot_count), f"Obj. {_format_number(peugeot_objective)} | {peugeot_compliance:,.1f}%", "sky"),
             ("Citroen", _format_number(citroen_count), f"Obj. {_format_number(citroen_objective)} | {citroen_compliance:,.1f}%", "indigo"),
-            ("Objetivo", _format_number(objective_total), f"Objetivo {selected_period}", "cyan"),
-            ("% Cumplimiento", f"{compliance:,.1f}%", "Suscripciones / objetivo", "indigo"),
+            ("Q Susc. Peugeot sin Filtros", _format_number(peugeot_confirmation_count), f"Conf. cliente | Obj. {_format_number(peugeot_objective)} | {peugeot_confirmation_compliance:,.1f}%", "cyan"),
+            ("Q Susc. Citroen", _format_number(citroen_confirmation_count), f"Conf. cliente | Obj. {_format_number(citroen_objective)} | {citroen_confirmation_compliance:,.1f}%", "indigo"),
             ("Vendedores", _format_number(view["vendedor"].replace("", pd.NA).nunique()), "Activos en filtro", "cyan"),
         ]
     )
@@ -1458,6 +1459,18 @@ def count_brand_subscriptions(df: pd.DataFrame, brand: str) -> int:
     if "marca" not in df.columns:
         return 0
     return int(df["marca"].fillna("").astype(str).str.contains(brand, case=False, na=False).sum())
+
+
+def count_brand_by_confirmation_month(df: pd.DataFrame, periodo: str, brand: str) -> int:
+    if df.empty or "fecha_confirmacion_cliente" not in df.columns or "marca" not in df.columns:
+        return 0
+
+    confirmation_dates = pd.to_datetime(df["fecha_confirmacion_cliente"], dayfirst=True, errors="coerce")
+    current_year = int(pd.Timestamp.today().year)
+    valid_dates = confirmation_dates.dt.year.between(2024, current_year + 1, inclusive="both")
+    period_match = confirmation_dates.dt.to_period("M").astype(str).eq(str(periodo))
+    brand_match = df["marca"].fillna("").astype(str).str.contains(brand, case=False, na=False)
+    return int((valid_dates & period_match & brand_match).sum())
 
 
 def _format_number(value) -> str:
